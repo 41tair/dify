@@ -80,6 +80,8 @@ const translation = {
     chooseDSL: '选择 DSL(yml) 文件',
     overwriteAndImport: '覆盖并导入',
     importFailure: '导入失败',
+    importWarning: '注意',
+    importWarningDetails: 'DSL 版本差异可能影响部分功能表现',
     importSuccess: '导入成功',
     parallelRun: '并行运行',
     parallelTip: {
@@ -369,6 +371,7 @@ const translation = {
       inputVars: '输入变量',
       api: 'API',
       apiPlaceholder: '输入 URL，输入变量时请键入‘/’',
+      extractListPlaceholder: '输入提取列表编号，输入变量时请键入‘/’',
       notStartWithHttp: 'API 应该以 http:// 或 https:// 开头',
       key: '键',
       type: '类型',
@@ -406,6 +409,10 @@ const translation = {
         readPlaceholder: '输入读取超时（以秒为单位）',
         writeLabel: '写入超时',
         writePlaceholder: '输入写入超时（以秒为单位）',
+      },
+      curl: {
+        title: '导入cURL',
+        placeholder: '粘贴 cURL 字符串',
       },
     },
     code: {
@@ -608,6 +615,7 @@ const translation = {
       filterConditionComparisonOperator: '过滤条件比较操作符',
       filterConditionComparisonValue: '过滤条件比较值',
       selectVariableKeyPlaceholder: '选择子变量的 Key',
+      extractsCondition: '取第 N 项',
       limit: '取前 N 项',
       orderBy: '排序',
       asc: '升序',

@@ -43,7 +43,6 @@ from core.workflow.graph_engine.entities.event import (
 )
 from core.workflow.graph_engine.entities.graph import Graph
 from core.workflow.nodes import NodeType
-from core.workflow.nodes.iteration import IterationNodeData
 from core.workflow.nodes.node_mapping import node_type_classes_mapping
 from core.workflow.workflow_entry import WorkflowEntry
 from extensions.ext_database import db
@@ -160,8 +159,6 @@ class WorkflowBasedAppRunner(AppRunner):
             user_inputs=user_inputs,
             variable_pool=variable_pool,
             tenant_id=workflow.tenant_id,
-            node_type=node_type,
-            node_data=IterationNodeData(**iteration_node_config.get("data", {})),
         )
 
         return graph, variable_pool
@@ -361,6 +358,7 @@ class WorkflowBasedAppRunner(AppRunner):
                     node_run_index=workflow_entry.graph_engine.graph_runtime_state.node_run_steps,
                     output=event.pre_iteration_output,
                     parallel_mode_run_id=event.parallel_mode_run_id,
+                    duration=event.duration,
                 )
             )
         elif isinstance(event, (IterationRunSucceededEvent | IterationRunFailedEvent)):

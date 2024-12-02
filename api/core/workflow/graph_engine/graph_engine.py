@@ -64,7 +64,6 @@ class GraphEngineThreadPool(ThreadPoolExecutor):
         self.submit_count -= 1
 
     def check_is_full(self) -> None:
-        print(f"submit_count: {self.submit_count}, max_submit_count: {self.max_submit_count}")
         if self.submit_count > self.max_submit_count:
             raise ValueError(f"Max submit count {self.max_submit_count} of workflow thread pool reached.")
 
@@ -172,7 +171,7 @@ class GraphEngine:
                                 "answer"
                             ].strip()
                 except Exception as e:
-                    logger.exception(f"Graph run failed: {str(e)}")
+                    logger.exception("Graph run failed")
                     yield GraphRunFailedEvent(error=str(e))
                     return
 
@@ -692,7 +691,7 @@ class GraphEngine:
             )
             return
         except Exception as e:
-            logger.exception(f"Node {node_instance.node_data.title} run failed: {str(e)}")
+            logger.exception(f"Node {node_instance.node_data.title} run failed")
             raise e
         finally:
             db.session.close()

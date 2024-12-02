@@ -1,11 +1,13 @@
 import redis
+from redis.cluster import ClusterNode, RedisCluster
 from redis.connection import Connection, SSLConnection
 from redis.sentinel import Sentinel
 
 from configs import dify_config
+from dify_app import DifyApp
 
 
-class RedisClientWrapper(redis.Redis):
+class RedisClientWrapper:
     """
     A wrapper class for the Redis client that addresses the issue where the global
     `redis_client` variable cannot be updated when a new Redis instance is returned
@@ -42,7 +44,7 @@ class RedisClientWrapper(redis.Redis):
 redis_client = RedisClientWrapper()
 
 
-def init_app(app):
+def init_app(app: DifyApp):
     global redis_client
     connection_class = Connection
     if dify_config.REDIS_USE_SSL:
@@ -71,6 +73,12 @@ def init_app(app):
         )
         master = sentinel.master_for(dify_config.REDIS_SENTINEL_SERVICE_NAME, **redis_params)
         redis_client.initialize(master)
+    elif dify_config.REDIS_USE_CLUSTERS:
+        nodes = [
+            ClusterNode(host=node.split(":")[0], port=int(node.split.split(":")[1]))
+            for node in dify_config.REDIS_CLUSTERS.split(",")
+        ]
+        redis_client.initialize(RedisCluster(startup_nodes=nodes, password=dify_config.REDIS_CLUSTERS_PASSWORD))
     else:
         redis_params.update(
             {
