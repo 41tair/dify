@@ -278,3 +278,9 @@ optional = true
 [tool.poetry.group.lint.dependencies]
 dotenv-linter = "~0.5.0"
 ruff = "~0.6.9"
+
+[[tool.poetry.source]]
+name = "mirror"
+url = "https://mirrors.aliyun.com/pypi/simple/"
+priority = "default"
+
