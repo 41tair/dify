@@ -1,5 +1,6 @@
 import concurrent.futures
-import json
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -42,11 +43,12 @@ class RetrievalService:
         reranking_model: Optional[dict] = None,
         reranking_mode: str = "reranking_model",
         weights: Optional[dict] = None,
+        document_ids_filter: Optional[list[str]] = None,
     ):
         if not query:
             return []
         dataset = cls._get_dataset(dataset_id)
-        if not dataset or dataset.available_document_count == 0 or dataset.available_segment_count == 0:
+        if not dataset:
             return []
 
         all_documents: list[Document] = []
@@ -65,6 +67,7 @@ class RetrievalService:
                         top_k=top_k,
                         all_documents=all_documents,
                         exceptions=exceptions,
+                        document_ids_filter=document_ids_filter,
                     )
                 )
             if RetrievalMethod.is_support_semantic_search(retrieval_method):
@@ -80,6 +83,7 @@ class RetrievalService:
                         all_documents=all_documents,
                         retrieval_method=retrieval_method,
                         exceptions=exceptions,
+                        document_ids_filter=document_ids_filter,
                     )
                 )
             if RetrievalMethod.is_support_fulltext_search(retrieval_method):
@@ -95,6 +99,7 @@ class RetrievalService:
                         all_documents=all_documents,
                         retrieval_method=retrieval_method,
                         exceptions=exceptions,
+                        document_ids_filter=document_ids_filter,
                     )
                 )
             concurrent.futures.wait(futures, timeout=30, return_when=concurrent.futures.ALL_COMPLETED)
@@ -131,7 +136,14 @@ class RetrievalService:
 
     @classmethod
     def keyword_search(
-        cls, flask_app: Flask, dataset_id: str, query: str, top_k: int, all_documents: list, exceptions: list
+        cls,
+        flask_app: Flask,
+        dataset_id: str,
+        query: str,
+        top_k: int,
+        all_documents: list,
+        exceptions: list,
+        document_ids_filter: Optional[list[str]] = None,
     ):
         with flask_app.app_context():
             try:
@@ -140,7 +152,10 @@ class RetrievalService:
                     raise ValueError("dataset not found")
 
                 keyword = Keyword(dataset=dataset)
-                documents = keyword.search(cls.escape_query_for_search(query), top_k=top_k)
+
+                documents = keyword.search(
+                    cls.escape_query_for_search(query), top_k=top_k, document_ids_filter=document_ids_filter
+                )
                 all_documents.extend(documents)
             except Exception as e:
                 exceptions.append(str(e))
@@ -157,6 +172,7 @@ class RetrievalService:
         all_documents: list,
         retrieval_method: str,
         exceptions: list,
+        document_ids_filter: Optional[list[str]] = None,
     ):
         with flask_app.app_context():
             try:
@@ -164,6 +180,7 @@ class RetrievalService:
                 if not dataset:
                     raise ValueError("dataset not found")
 
+                start = time.time()
                 vector = Vector(dataset=dataset)
                 documents = vector.search_by_vector(
                     query,
@@ -171,7 +188,9 @@ class RetrievalService:
                     top_k=top_k,
                     score_threshold=score_threshold,
                     filter={"group_id": [dataset.id]},
+                    document_ids_filter=document_ids_filter,
                 )
+                logging.debug(f"embedding_search ends at {time.time() - start:.2f} seconds")
 
                 if documents:
                     if (
@@ -208,6 +227,7 @@ class RetrievalService:
         all_documents: list,
         retrieval_method: str,
         exceptions: list,
+        document_ids_filter: Optional[list[str]] = None,
     ):
         with flask_app.app_context():
             try:
@@ -217,7 +237,9 @@ class RetrievalService:
 
                 vector_processor = Vector(dataset=dataset)
 
-                documents = vector_processor.search_by_full_text(cls.escape_query_for_search(query), top_k=top_k)
+                documents = vector_processor.search_by_full_text(
+                    cls.escape_query_for_search(query), top_k=top_k, document_ids_filter=document_ids_filter
+                )
                 if documents:
                     if (
                         reranking_model
@@ -243,7 +265,7 @@ class RetrievalService:
 
     @staticmethod
     def escape_query_for_search(query: str) -> str:
-        return json.dumps(query).strip('"')
+        return query.replace('"', '\\"')
 
     @classmethod
     def format_retrieval_documents(cls, documents: list[Document]) -> list[RetrievalSegments]:
@@ -252,7 +274,8 @@ class RetrievalService:
             return []
 
         try:
-            # Collect document IDs
+            start_time = time.time()
+            # Collect document IDs with existence check
             document_ids = {doc.metadata.get("document_id") for doc in documents if "document_id" in doc.metadata}
             if not document_ids:
                 return []
@@ -270,41 +293,102 @@ class RetrievalService:
             include_segment_ids = set()
             segment_child_map = {}
 
-            # Process documents
+            # Precompute doc_forms to avoid redundant checks
+            doc_forms = {}
+            for doc in documents:
+                document_id = doc.metadata.get("document_id")
+                dataset_doc = dataset_documents.get(document_id)
+                if dataset_doc:
+                    doc_forms[document_id] = dataset_doc.doc_form
+
+            # Batch collect index node IDs with type safety
+            child_index_node_ids = []
+            index_node_ids = []
+            for doc in documents:
+                document_id = doc.metadata.get("document_id")
+                if doc_forms.get(document_id) == IndexType.PARENT_CHILD_INDEX:
+                    child_index_node_ids.append(doc.metadata.get("doc_id"))
+                else:
+                    index_node_ids.append(doc.metadata.get("doc_id"))
+
+            # Batch query ChildChunk
+            child_chunks = db.session.query(ChildChunk).filter(ChildChunk.index_node_id.in_(child_index_node_ids)).all()
+            child_chunk_map = {chunk.index_node_id: chunk for chunk in child_chunks}
+
+            # Batch query DocumentSegment with unified conditions
+            segment_map = {
+                segment.id: segment
+                for segment in db.session.query(DocumentSegment)
+                .filter(
+                    (
+                        DocumentSegment.index_node_id.in_(index_node_ids)
+                        | DocumentSegment.id.in_([chunk.segment_id for chunk in child_chunks])
+                    ),
+                    DocumentSegment.enabled == True,
+                    DocumentSegment.status == "completed",
+                )
+                .options(
+                    load_only(
+                        DocumentSegment.id,
+                        DocumentSegment.content,
+                        DocumentSegment.answer,
+                    )
+                )
+                .all()
+            }
+
             for document in documents:
                 document_id = document.metadata.get("document_id")
-                if document_id not in dataset_documents:
+                dataset_document = dataset_documents.get(document_id)
+                if not dataset_document:
                     continue
 
-                dataset_document = dataset_documents[document_id]
-
-                if dataset_document.doc_form == IndexType.PARENT_CHILD_INDEX:
-                    # Handle parent-child documents
+                doc_form = doc_forms.get(document_id)
+                if doc_form == IndexType.PARENT_CHILD_INDEX:
+                    # Handle parent-child documents using preloaded data
                     child_index_node_id = document.metadata.get("doc_id")
+                    if not child_index_node_id:
+                        continue
 
-                    child_chunk = (
-                        db.session.query(ChildChunk).filter(ChildChunk.index_node_id == child_index_node_id).first()
-                    )
-
+                    child_chunk = child_chunk_map.get(child_index_node_id)
                     if not child_chunk:
                         continue
 
-                    segment = (
-                        db.session.query(DocumentSegment)
-                        .filter(
-                            DocumentSegment.dataset_id == dataset_document.dataset_id,
-                            DocumentSegment.enabled == True,
-                            DocumentSegment.status == "completed",
-                            DocumentSegment.id == child_chunk.segment_id,
-                        )
-                        .options(
-                            load_only(
-                                DocumentSegment.id,
-                                DocumentSegment.content,
-                                DocumentSegment.answer,
-                            )
-                        )
-                        .first()
+                    segment = segment_map.get(child_chunk.segment_id)
+                    if not segment:
+                        continue
+
+                    if segment.id not in include_segment_ids:
+                        include_segment_ids.add(segment.id)
+                        map_detail = {"max_score": document.metadata.get("score", 0.0), "child_chunks": []}
+                        segment_child_map[segment.id] = map_detail
+                        records.append({"segment": segment})
+
+                    # Append child chunk details
+                    child_chunk_detail = {
+                        "id": child_chunk.id,
+                        "content": child_chunk.content,
+                        "position": child_chunk.position,
+                        "score": document.metadata.get("score", 0.0),
+                    }
+                    segment_child_map[segment.id]["child_chunks"].append(child_chunk_detail)
+                    segment_child_map[segment.id]["max_score"] = max(
+                        segment_child_map[segment.id]["max_score"], document.metadata.get("score", 0.0)
+                    )
+
+                else:
+                    # Handle normal documents
+                    index_node_id = document.metadata.get("doc_id")
+                    if not index_node_id:
+                        continue
+
+                    segment = next(
+                        (
+                            s
+                            for s in segment_map.values()
+                            if s.index_node_id == index_node_id and s.dataset_id == dataset_document.dataset_id
+                        ),
+                        None,
                     )
 
                     if not segment:
@@ -312,66 +396,23 @@ class RetrievalService:
 
                     if segment.id not in include_segment_ids:
                         include_segment_ids.add(segment.id)
-                        child_chunk_detail = {
-                            "id": child_chunk.id,
-                            "content": child_chunk.content,
-                            "position": child_chunk.position,
-                            "score": document.metadata.get("score", 0.0),
-                        }
-                        map_detail = {
-                            "max_score": document.metadata.get("score", 0.0),
-                            "child_chunks": [child_chunk_detail],
-                        }
-                        segment_child_map[segment.id] = map_detail
-                        record = {
-                            "segment": segment,
-                        }
-                        records.append(record)
-                    else:
-                        child_chunk_detail = {
-                            "id": child_chunk.id,
-                            "content": child_chunk.content,
-                            "position": child_chunk.position,
-                            "score": document.metadata.get("score", 0.0),
-                        }
-                        segment_child_map[segment.id]["child_chunks"].append(child_chunk_detail)
-                        segment_child_map[segment.id]["max_score"] = max(
-                            segment_child_map[segment.id]["max_score"], document.metadata.get("score", 0.0)
+                        records.append(
+                            {
+                                "segment": segment,
+                                "score": document.metadata.get("score", 0.0),
+                            }
                         )
-                else:
-                    # Handle normal documents
-                    index_node_id = document.metadata.get("doc_id")
-                    if not index_node_id:
-                        continue
 
-                    segment = (
-                        db.session.query(DocumentSegment)
-                        .filter(
-                            DocumentSegment.dataset_id == dataset_document.dataset_id,
-                            DocumentSegment.enabled == True,
-                            DocumentSegment.status == "completed",
-                            DocumentSegment.index_node_id == index_node_id,
-                        )
-                        .first()
-                    )
-
-                    if not segment:
-                        continue
-
-                    include_segment_ids.add(segment.id)
-                    record = {
-                        "segment": segment,
-                        "score": document.metadata.get("score"),  # type: ignore
-                    }
-                    records.append(record)
-
-            # Add child chunks information to records
+            # Merge child chunks information
             for record in records:
-                if record["segment"].id in segment_child_map:
-                    record["child_chunks"] = segment_child_map[record["segment"].id].get("child_chunks")  # type: ignore
-                    record["score"] = segment_child_map[record["segment"].id]["max_score"]
+                segment_id = record["segment"].id
+                if segment_id in segment_child_map:
+                    record["child_chunks"] = segment_child_map[segment_id]["child_chunks"]
+                    record["score"] = segment_child_map[segment_id]["max_score"]
 
+            logging.debug(f"Formatting retrieval documents took {time.time() - start_time:.2f} seconds")
             return [RetrievalSegments(**record) for record in records]
         except Exception as e:
+            # Only rollback if there were write operations
             db.session.rollback()
             raise e
