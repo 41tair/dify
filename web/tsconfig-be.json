@@ -1,0 +1,17 @@
+{
+  "extends": "tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@/*": [
+        "./*"
+      ],
+      "~@/*": [
+        "./*"
+      ],
+      "$/*": [
+        "./editions/be/*",
+        "./editions/ce/*"
+      ]
+    }
+  },
+}

@@ -1,16 +1,16 @@
 import { useTranslation } from 'react-i18next'
 import { RiGraduationCapFill } from '@remixicon/react'
-import PremiumBadge from '../../../base/premium-badge'
-import { Plan } from '../../../billing/type'
+import PremiumBadge from '@/app/components/base/premium-badge'
+import { Plan } from '@/app/components/billing/type'
 import { useProviderContext } from '@/context/provider-context'
-import { SparklesSoft } from '../../../base/icons/src/public/common'
-import type { PlanBadgeComponent } from '../../plan-badge/types'
+import { SparklesSoft } from '@/app/components/base/icons/src/public/common'
+import type { PlanBadgeComponent } from '@/app/components/header/plan-badge/types'
 
 /**
  * Enterprise Edition implementation of PlanBadge
  * Includes all plan types: sandbox, professional, team, enterprise
  */
-const PlanBadgeEE: PlanBadgeComponent = ({ plan, allowHover, sandboxAsUpgrade = false, onClick }) => {
+const PlanBadgeBE: PlanBadgeComponent = ({ plan, allowHover, sandboxAsUpgrade = false, onClick }) => {
   const { isFetchedPlan, isEducationWorkspace } = useProviderContext()
   const { t } = useTranslation()
 
@@ -98,4 +98,4 @@ const PlanBadgeEE: PlanBadgeComponent = ({ plan, allowHover, sandboxAsUpgrade = 
   return null
 }
 
-export default PlanBadgeEE
+export default PlanBadgeBE

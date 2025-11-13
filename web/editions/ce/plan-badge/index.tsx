@@ -1,9 +1,9 @@
 import { useTranslation } from 'react-i18next'
-import PremiumBadge from '../../base/premium-badge'
-import { Plan } from '../../billing/type'
+import PremiumBadge from '@/app/components/base/premium-badge'
+import { Plan } from '@/app/components/billing/type'
 import { useProviderContext } from '@/context/provider-context'
-import { SparklesSoft } from '../../base/icons/src/public/common'
-import type { PlanBadgeComponent } from './types'
+import { SparklesSoft } from '@/app/components/base/icons/src/public/common'
+import type { PlanBadgeComponent } from '@/app/components/header/plan-badge/types'
 
 /**
  * Community Edition implementation of PlanBadge
