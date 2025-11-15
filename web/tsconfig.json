@@ -33,6 +33,10 @@
       "$/*": [
         "./editions/be/*",
         "./editions/ce/*"
+      ],
+      "~$/*": [
+        "./editions/be/*",
+        "./editions/ce/*"
       ]
     }
   },

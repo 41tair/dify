@@ -1,5 +1,5 @@
 {
-  "extends": "tsconfig.json",
+  "extends": "./tsconfig.json",
   "compilerOptions": {
     "paths": {
       "@/*": [
@@ -9,7 +9,9 @@
         "./*"
       ],
       "$/*": [
-        "./editions/be/*",
+        "./editions/ce/*"
+      ],
+      "~$/*": [
         "./editions/ce/*"
       ]
     }

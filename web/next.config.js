@@ -91,6 +91,8 @@ const port = process.env.PORT || 3000
 const locImageURLs = !hasSetWebPrefix ? [new URL(`http://localhost:${port}/**`), new URL(`http://127.0.0.1:${port}/**`)] : []
 const remoteImageURLs = [hasSetWebPrefix ? new URL(`${process.env.NEXT_PUBLIC_WEB_PREFIX}/**`) : '', ...locImageURLs].filter(item => !!item)
 
+const isCommunityEdition = process.env.NEXT_PUBLIC_EDITION === 'SELF_HOSTED'
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   basePath: process.env.NEXT_PUBLIC_BASE_PATH || '',
@@ -128,6 +130,13 @@ const nextConfig = {
   typescript: {
     // https://nextjs.org/docs/api-reference/next.config.js/ignoring-typescript-errors
     ignoreBuildErrors: true,
+    ...(
+      isCommunityEdition
+        ? {
+          tsconfigPath: 'tsconfig.ce.json',
+        }
+        : {}
+    ),
   },
   reactStrictMode: true,
   async redirects() {
