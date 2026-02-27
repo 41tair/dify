@@ -1,6 +1,8 @@
 from datetime import datetime
 from unittest.mock import MagicMock
 
+from core.workflow.runtime.node_execution_runtime_store import workflow_node_execution_runtime_store
+
 from core.app.workflow.layers import PersistenceWorkflowInfo, WorkflowPersistenceLayer
 from core.workflow.entities import WorkflowStartReason
 from core.workflow.enums import NodeType, SystemVariableKey, WorkflowType
@@ -11,7 +13,6 @@ from core.workflow.graph_events import (
     NodeRunSucceededEvent,
 )
 from core.workflow.node_events import NodeRunResult
-from core.workflow.runtime.node_execution_runtime_store import workflow_node_execution_runtime_store
 
 
 class _VariablePoolStub:

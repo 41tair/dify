@@ -5,15 +5,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
+from core.workflow.runtime.node_execution_runtime_store import (
+    NodeExecutionRuntimeSnapshot,
+    workflow_node_execution_runtime_store,
+)
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
 import contexts
 from core.workflow.enums import WorkflowExecutionStatus
-from core.workflow.runtime.node_execution_runtime_store import (
-    NodeExecutionRuntimeSnapshot,
-    workflow_node_execution_runtime_store,
-)
 from extensions.ext_database import db
 from libs.infinite_scroll_pagination import InfiniteScrollPagination
 from models import (
@@ -146,7 +146,7 @@ class WorkflowRunService:
         app_model: App,
         run_id: str,
         user: Account | EndUser,
-    ) -> Sequence[WorkflowNodeExecutionModel | "_RuntimeWorkflowNodeExecutionView"]:
+    ) -> Sequence[WorkflowNodeExecutionModel | _RuntimeWorkflowNodeExecutionView]:
         """
         Get workflow run node execution list
         """
@@ -220,7 +220,7 @@ class _RuntimeWorkflowNodeExecutionView:
         return metadata
 
     @classmethod
-    def from_snapshot(cls, snapshot: NodeExecutionRuntimeSnapshot) -> "_RuntimeWorkflowNodeExecutionView":
+    def from_snapshot(cls, snapshot: NodeExecutionRuntimeSnapshot) -> _RuntimeWorkflowNodeExecutionView:
         return cls(
             id=snapshot.execution_id,
             index=snapshot.index,

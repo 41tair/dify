@@ -1,11 +1,12 @@
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
-from core.workflow.enums import WorkflowExecutionStatus
 from core.workflow.runtime.node_execution_runtime_store import (
     NodeExecutionRuntimeSnapshot,
     workflow_node_execution_runtime_store,
 )
+
+from core.workflow.enums import WorkflowExecutionStatus
 from models import Account, App
 from services.workflow_run_service import WorkflowRunService
 
