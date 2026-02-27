@@ -1,10 +1,19 @@
+from __future__ import annotations
+
 import threading
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
 import contexts
+from core.workflow.enums import WorkflowExecutionStatus
+from core.workflow.runtime.node_execution_runtime_store import (
+    NodeExecutionRuntimeSnapshot,
+    workflow_node_execution_runtime_store,
+)
 from extensions.ext_database import db
 from libs.infinite_scroll_pagination import InfiniteScrollPagination
 from models import (
@@ -137,7 +146,7 @@ class WorkflowRunService:
         app_model: App,
         run_id: str,
         user: Account | EndUser,
-    ) -> Sequence[WorkflowNodeExecutionModel]:
+    ) -> Sequence[WorkflowNodeExecutionModel | "_RuntimeWorkflowNodeExecutionView"]:
         """
         Get workflow run node execution list
         """
@@ -154,8 +163,78 @@ class WorkflowRunService:
         if tenant_id is None:
             raise ValueError("User tenant_id cannot be None")
 
+        if workflow_run.status == WorkflowExecutionStatus.RUNNING:
+            runtime_snapshots = workflow_node_execution_runtime_store.list(run_id)
+            if runtime_snapshots:
+                return [_RuntimeWorkflowNodeExecutionView.from_snapshot(snapshot) for snapshot in runtime_snapshots]
+
         return self._node_execution_service_repo.get_executions_by_workflow_run(
             tenant_id=tenant_id,
             app_id=app_model.id,
             workflow_run_id=run_id,
+        )
+
+
+@dataclass(slots=True)
+class _RuntimeWorkflowNodeExecutionView:
+    """Read-model adapter for node executions that are still in memory."""
+
+    id: str
+    index: int
+    predecessor_node_id: str | None
+    node_id: str
+    node_type: str
+    title: str
+    status: str
+    error: str | None
+    elapsed_time: float
+    created_at: datetime
+    finished_at: datetime | None
+    extras: dict[str, object]
+    created_by_role: str | None = None
+    created_by_account: object | None = None
+    created_by_end_user: object | None = None
+    inputs_truncated: bool = False
+    outputs_truncated: bool = False
+    process_data_truncated: bool = False
+
+    @property
+    def inputs_dict(self) -> dict[str, object] | None:
+        return None
+
+    @property
+    def process_data_dict(self) -> dict[str, object] | None:
+        return None
+
+    @property
+    def outputs_dict(self) -> dict[str, object] | None:
+        return None
+
+    @property
+    def execution_metadata_dict(self) -> dict[str, object]:
+        metadata: dict[str, object] = {}
+        if self.extras.get("iteration_id") is not None:
+            metadata["iteration_id"] = self.extras["iteration_id"]
+        if self.extras.get("loop_id") is not None:
+            metadata["loop_id"] = self.extras["loop_id"]
+        return metadata
+
+    @classmethod
+    def from_snapshot(cls, snapshot: NodeExecutionRuntimeSnapshot) -> "_RuntimeWorkflowNodeExecutionView":
+        return cls(
+            id=snapshot.execution_id,
+            index=snapshot.index,
+            predecessor_node_id=None,
+            node_id=snapshot.node_id,
+            node_type=snapshot.node_type,
+            title=snapshot.title,
+            status=snapshot.status,
+            error=None,
+            elapsed_time=snapshot.elapsed_time,
+            created_at=snapshot.created_at,
+            finished_at=snapshot.finished_at,
+            extras={
+                "iteration_id": snapshot.iteration_id,
+                "loop_id": snapshot.loop_id,
+            },
         )

@@ -123,6 +123,9 @@ echo "  Concurrency: ${CONCURRENCY}"
 echo "  Pool: ${POOL}"
 echo "  Log Level: ${LOGLEVEL}"
 
-uv run \
-  celery -A app.celery worker \
+sudo py-spy record -f speedscope -o profile.json --subprocesses -- \
+  uv run celery -A app.celery worker \
   -P ${POOL} -c ${CONCURRENCY} --loglevel ${LOGLEVEL} -Q ${QUEUES}
+# uv run \
+    #   celery -A app.celery worker \
+#   -P ${POOL} -c ${CONCURRENCY} --loglevel ${LOGLEVEL} -Q ${QUEUES}

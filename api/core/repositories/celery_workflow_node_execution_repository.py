@@ -188,3 +188,12 @@ class CeleryWorkflowNodeExecutionRepository(WorkflowNodeExecutionRepository):
         except Exception:
             logger.exception("Failed to get workflow node executions for run %s from cache", workflow_run_id)
             return []
+
+    def save_execution_data(self, execution: WorkflowNodeExecution):
+        """Celery repository stores execution payloads in the same async save task."""
+        self.save(execution)
+
+    def save_batch(self, executions: Sequence[WorkflowNodeExecution]) -> None:
+        """Fallback batch implementation that queues each execution independently."""
+        for execution in executions:
+            self.save(execution)

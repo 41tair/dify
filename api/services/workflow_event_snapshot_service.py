@@ -25,10 +25,15 @@ from core.app.layers.pause_state_persist_layer import WorkflowResumptionContext
 from core.workflow.entities import WorkflowStartReason
 from core.workflow.enums import WorkflowExecutionStatus, WorkflowNodeExecutionStatus
 from core.workflow.runtime import GraphRuntimeState
+from core.workflow.runtime.node_execution_runtime_store import (
+    NodeExecutionRuntimeSnapshot,
+    workflow_node_execution_runtime_store,
+)
 from core.workflow.workflow_type_encoder import WorkflowRuntimeTypeConverter
 from models.model import AppMode, Message
 from models.workflow import WorkflowNodeExecutionTriggeredFrom, WorkflowRun
 from repositories.api_workflow_node_execution_repository import WorkflowNodeExecutionSnapshot
+from repositories.api_workflow_node_execution_repository import DifyAPIWorkflowNodeExecutionRepository
 from repositories.entities.workflow_pause import WorkflowPauseEntity
 from repositories.factory import DifyAPIRepositoryFactory
 
@@ -78,19 +83,11 @@ def build_workflow_event_stream(
             pause_entity = None
 
     resumption_context = _load_resumption_context(pause_entity)
-    node_snapshots = node_execution_repo.get_execution_snapshots_by_workflow_run(
+    node_snapshots = _load_node_snapshots(
+        node_execution_repo=node_execution_repo,
+        workflow_run=workflow_run,
         tenant_id=tenant_id,
         app_id=app_id,
-        workflow_id=workflow_run.workflow_id,
-        # NOTE(QuantumGhost): for events resumption, we only care about
-        # the execution records from `WORKFLOW_RUN`.
-        #
-        # Ideally filtering with `workflow_run_id` is enough. However,
-        # due to the index of `WorkflowNodeExecution` table, we have to
-        # add a filter condition of `triggered_from` to
-        # ensure that we can utilize the index.
-        triggered_from=WorkflowNodeExecutionTriggeredFrom.WORKFLOW_RUN,
-        workflow_run_id=workflow_run.id,
     )
 
     def _generate() -> Generator[Mapping[str, Any] | str, None, None]:
@@ -253,6 +250,49 @@ def _build_snapshot_events(
             events.append(pause_event)
 
     return events
+
+
+def _load_node_snapshots(
+    *,
+    node_execution_repo: DifyAPIWorkflowNodeExecutionRepository,
+    workflow_run: WorkflowRun,
+    tenant_id: str,
+    app_id: str,
+) -> Sequence[WorkflowNodeExecutionSnapshot]:
+    runtime_snapshots = workflow_node_execution_runtime_store.list(workflow_run.id)
+    if workflow_run.status == WorkflowExecutionStatus.RUNNING and runtime_snapshots:
+        return [_runtime_snapshot_to_repository_snapshot(snapshot) for snapshot in runtime_snapshots]
+
+    return node_execution_repo.get_execution_snapshots_by_workflow_run(
+        tenant_id=tenant_id,
+        app_id=app_id,
+        workflow_id=workflow_run.workflow_id,
+        # NOTE(QuantumGhost): for events resumption, we only care about
+        # the execution records from `WORKFLOW_RUN`.
+        #
+        # Ideally filtering with `workflow_run_id` is enough. However,
+        # due to the index of `WorkflowNodeExecution` table, we have to
+        # add a filter condition of `triggered_from` to
+        # ensure that we can utilize the index.
+        triggered_from=WorkflowNodeExecutionTriggeredFrom.WORKFLOW_RUN,
+        workflow_run_id=workflow_run.id,
+    )
+
+
+def _runtime_snapshot_to_repository_snapshot(snapshot: NodeExecutionRuntimeSnapshot) -> WorkflowNodeExecutionSnapshot:
+    return WorkflowNodeExecutionSnapshot(
+        execution_id=snapshot.execution_id,
+        node_id=snapshot.node_id,
+        node_type=snapshot.node_type,
+        title=snapshot.title,
+        index=snapshot.index,
+        status=snapshot.status,
+        elapsed_time=snapshot.elapsed_time,
+        created_at=snapshot.created_at,
+        finished_at=snapshot.finished_at,
+        iteration_id=snapshot.iteration_id,
+        loop_id=snapshot.loop_id,
+    )
 
 
 def _build_workflow_started_event(

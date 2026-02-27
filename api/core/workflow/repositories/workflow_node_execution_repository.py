@@ -71,3 +71,12 @@ class WorkflowNodeExecutionRepository(Protocol):
             A list of NodeExecution instances
         """
         ...
+
+    def save_batch(self, executions: Sequence[WorkflowNodeExecution]) -> None:
+        """
+        Save a batch of node executions in one persistence pass.
+
+        Implementations should optimize this path to reduce round trips and
+        transaction overhead when flushing final workflow execution results.
+        """
+        ...

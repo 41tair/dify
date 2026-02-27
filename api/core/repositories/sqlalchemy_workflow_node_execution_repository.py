@@ -11,6 +11,7 @@ from typing import Any, TypeVar, Union
 
 import psycopg2.errors
 from sqlalchemy import UnaryExpression, asc, desc, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
@@ -456,6 +457,125 @@ class SQLAlchemyWorkflowNodeExecutionRepository(WorkflowNodeExecutionRepository)
         with self._session_factory() as session, session.begin():
             session.merge(db_model)
             session.flush()
+
+    def save_batch(self, executions: Sequence[WorkflowNodeExecution]) -> None:
+        """Persist final node execution snapshots in a single database transaction.
+
+        This method is intended for graph-terminal flushes where all node executions
+        are already materialized in memory. It avoids per-node read-before-write
+        queries and performs batched upserts.
+        """
+        if not executions:
+            return
+
+        db_models: list[WorkflowNodeExecutionModel] = []
+        offloads: list[WorkflowNodeExecutionOffload] = []
+        for execution in executions:
+            db_model = self._to_db_model(execution)
+            self._apply_execution_data_to_db_model(execution=execution, db_model=db_model)
+            db_models.append(db_model)
+            offloads.extend(db_model.offload_data)
+            if db_model.node_execution_id:
+                self._node_execution_cache[db_model.node_execution_id] = db_model
+
+        with self._session_factory() as session, session.begin():
+            self._upsert_node_execution_models(session=session, db_models=db_models)
+            self._upsert_offloads(session=session, offloads=offloads)
+
+    def _apply_execution_data_to_db_model(
+        self, *, execution: WorkflowNodeExecution, db_model: WorkflowNodeExecutionModel
+    ) -> None:
+        offload_data = db_model.offload_data
+
+        if execution.inputs is not None:
+            result = self._truncate_and_upload(
+                execution.inputs,
+                execution.id,
+                ExecutionOffLoadType.INPUTS,
+            )
+            if result is not None:
+                db_model.inputs = self._json_encode(result.truncated_value)
+                execution.set_truncated_inputs(result.truncated_value)
+                offload_data = _replace_or_append_offload(offload_data, result.offload)
+            else:
+                db_model.inputs = self._json_encode(execution.inputs)
+
+        if execution.outputs is not None:
+            result = self._truncate_and_upload(
+                execution.outputs,
+                execution.id,
+                ExecutionOffLoadType.OUTPUTS,
+            )
+            if result is not None:
+                db_model.outputs = self._json_encode(result.truncated_value)
+                execution.set_truncated_outputs(result.truncated_value)
+                offload_data = _replace_or_append_offload(offload_data, result.offload)
+            else:
+                db_model.outputs = self._json_encode(execution.outputs)
+
+        if execution.process_data is not None:
+            result = self._truncate_and_upload(
+                execution.process_data,
+                execution.id,
+                ExecutionOffLoadType.PROCESS_DATA,
+            )
+            if result is not None:
+                db_model.process_data = self._json_encode(result.truncated_value)
+                execution.set_truncated_process_data(result.truncated_value)
+                offload_data = _replace_or_append_offload(offload_data, result.offload)
+            else:
+                db_model.process_data = self._json_encode(execution.process_data)
+
+        db_model.offload_data = offload_data
+
+    def _upsert_node_execution_models(self, *, session, db_models: Sequence[WorkflowNodeExecutionModel]) -> None:
+        if not db_models:
+            return
+
+        mappings: list[dict[str, Any]] = []
+        column_names = [column.name for column in WorkflowNodeExecutionModel.__table__.columns]
+        for db_model in db_models:
+            mappings.append({name: getattr(db_model, name) for name in column_names})
+
+        insert_stmt = pg_insert(WorkflowNodeExecutionModel).values(mappings)
+        update_values = {
+            name: getattr(insert_stmt.excluded, name)
+            for name in column_names
+            if name != "id"
+        }
+        upsert_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=[WorkflowNodeExecutionModel.id],
+            set_=update_values,
+        )
+        session.execute(upsert_stmt)
+
+    def _upsert_offloads(self, *, session, offloads: Sequence[WorkflowNodeExecutionOffload]) -> None:
+        if not offloads:
+            return
+
+        mappings = [
+            {
+                "id": offload.id,
+                "created_at": offload.created_at,
+                "tenant_id": offload.tenant_id,
+                "app_id": offload.app_id,
+                "node_execution_id": offload.node_execution_id,
+                "type": offload.type_,
+                "file_id": offload.file_id,
+            }
+            for offload in offloads
+        ]
+
+        insert_stmt = pg_insert(WorkflowNodeExecutionOffload).values(mappings)
+        upsert_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=[WorkflowNodeExecutionOffload.node_execution_id, WorkflowNodeExecutionOffload.type_],
+            set_={
+                "file_id": insert_stmt.excluded.file_id,
+                "tenant_id": insert_stmt.excluded.tenant_id,
+                "app_id": insert_stmt.excluded.app_id,
+            },
+        )
+        session.execute(upsert_stmt)
 
     def get_db_models_by_workflow_run(
         self,
