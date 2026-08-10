@@ -12,9 +12,11 @@ from core.db.session_factory import get_session_maker
 from core.schemas.schema_manager import SchemaManager
 from enums.deployment_edition import DeploymentEdition
 from extensions.ext_redis import RedisClientWrapper, redis_client
+from repositories.account_unit_of_work import SQLAlchemyAccountUnitOfWorkFactory
 from repositories.installation_state_repository import InstallationStateRepository
 from repositories.workspace_member_query_repository import WorkspaceMemberQueryRepository
 from repositories.workspace_query_repository import WorkspaceQueryRepository
+from services.account_profile_service import AccountProfileService
 from services.feature_query_service import FeatureQueryService
 from services.feature_service import FeatureService
 from services.feature_service_gateway import FeatureServiceGateway
@@ -30,7 +32,13 @@ _EXTENSION_KEY = "application_services"
 
 
 @dataclass(frozen=True, slots=True)
+class AccountApplicationServices:
+    profile: AccountProfileService
+
+
+@dataclass(frozen=True, slots=True)
 class ApplicationServices:
+    accounts: AccountApplicationServices
     schema_definitions: SchemaDefinitionService
     setup: SetupService
     feature_queries: FeatureQueryService
@@ -45,7 +53,11 @@ def build_application_services(
     redis: RedisClientWrapper,
 ) -> ApplicationServices:
     installation_state = InstallationStateRepository(client=database_client)
+    account_unit_of_work = SQLAlchemyAccountUnitOfWorkFactory(database_client)
     return ApplicationServices(
+        accounts=AccountApplicationServices(
+            profile=AccountProfileService(unit_of_work=account_unit_of_work),
+        ),
         schema_definitions=SchemaDefinitionService(source_factory=SchemaManager),
         setup=SetupService(
             state=installation_state,
