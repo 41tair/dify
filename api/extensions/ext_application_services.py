@@ -16,6 +16,11 @@ from repositories.account_unit_of_work import SQLAlchemyAccountUnitOfWorkFactory
 from repositories.installation_state_repository import InstallationStateRepository
 from repositories.workspace_member_query_repository import WorkspaceMemberQueryRepository
 from repositories.workspace_query_repository import WorkspaceQueryRepository
+from services.account_avatar_file_gateway import SQLAlchemyAccountAvatarFileGateway
+from services.account_avatar_service import AccountAvatarService
+from services.account_integration_service import AccountIntegrationService
+from services.account_password_hasher import LegacyAccountPasswordHasher
+from services.account_password_service import AccountPasswordService
 from services.account_profile_service import AccountProfileService
 from services.feature_query_service import FeatureQueryService
 from services.feature_service import FeatureService
@@ -33,6 +38,9 @@ _EXTENSION_KEY = "application_services"
 
 @dataclass(frozen=True, slots=True)
 class AccountApplicationServices:
+    avatar: AccountAvatarService
+    integrations: AccountIntegrationService
+    password: AccountPasswordService
     profile: AccountProfileService
 
 
@@ -56,6 +64,14 @@ def build_application_services(
     account_unit_of_work = SQLAlchemyAccountUnitOfWorkFactory(database_client)
     return ApplicationServices(
         accounts=AccountApplicationServices(
+            avatar=AccountAvatarService(
+                files=SQLAlchemyAccountAvatarFileGateway(session_factory=database_client),
+            ),
+            integrations=AccountIntegrationService(unit_of_work=account_unit_of_work),
+            password=AccountPasswordService(
+                unit_of_work=account_unit_of_work,
+                passwords=LegacyAccountPasswordHasher(),
+            ),
             profile=AccountProfileService(unit_of_work=account_unit_of_work),
         ),
         schema_definitions=SchemaDefinitionService(source_factory=SchemaManager),

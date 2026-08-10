@@ -1,12 +1,9 @@
 """Application service for reading and updating the current account profile."""
 
 from machinery.context import RequestContext
-from services.account_ports import AccountUnitOfWorkFactory
+from services.account_errors import AccountNotFoundError
+from services.account_ports import AccountRepositoryUnitOfWork, UnitOfWorkFactory
 from services.entities.account_entities import AccountProfileChanges, AccountSnapshot
-
-
-class AccountNotFoundError(Exception):
-    """The admitted account no longer exists."""
 
 
 class EmptyAccountProfileChangesError(ValueError):
@@ -14,7 +11,7 @@ class EmptyAccountProfileChangesError(ValueError):
 
 
 class AccountProfileService:
-    def __init__(self, *, unit_of_work: AccountUnitOfWorkFactory) -> None:
+    def __init__(self, *, unit_of_work: UnitOfWorkFactory[AccountRepositoryUnitOfWork]) -> None:
         self._unit_of_work = unit_of_work
 
     def get(self, context: RequestContext) -> AccountSnapshot:

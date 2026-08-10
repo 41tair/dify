@@ -1,9 +1,9 @@
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
-from models.account import Account
+from models.account import Account, AccountIntegrate
 from repositories.account_unit_of_work import SQLAlchemyAccountUnitOfWorkFactory
-from services.entities.account_entities import AccountProfileChanges
+from services.entities.account_entities import AccountPasswordDigest, AccountProfileChanges
 
 
 def _persist_account(session: Session) -> Account:
@@ -71,3 +71,50 @@ def test_unit_of_work_rolls_back_uncommitted_profile_changes(
     persisted = sqlite_session.get(Account, "account-1")
     assert persisted is not None
     assert persisted.name == "Original"
+
+
+def test_unit_of_work_updates_password_through_account_repository(
+    sqlite_session: Session,
+    sqlite_session_factory: sessionmaker[Session],
+) -> None:
+    _persist_account(sqlite_session)
+    factory = SQLAlchemyAccountUnitOfWorkFactory(sqlite_session_factory)
+    digest = AccountPasswordDigest(password_hash="new-hash", password_salt="new-salt")
+
+    with factory() as unit_of_work:
+        credentials = unit_of_work.accounts.get_credentials("account-1")
+        result = unit_of_work.accounts.update_password("account-1", digest)
+        unit_of_work.commit()
+
+    assert credentials is not None
+    assert credentials.password_hash is None
+    assert result is not None
+    assert result.is_password_set is True
+    sqlite_session.expire_all()
+    persisted = sqlite_session.get(Account, "account-1")
+    assert persisted is not None
+    assert persisted.password == "new-hash"
+    assert persisted.password_salt == "new-salt"
+
+
+def test_unit_of_work_exposes_account_integrations_from_the_same_short_lived_session(
+    sqlite_session: Session,
+    sqlite_session_factory: sessionmaker[Session],
+) -> None:
+    _persist_account(sqlite_session)
+    sqlite_session.add(
+        AccountIntegrate(
+            account_id="account-1",
+            provider="github",
+            open_id="github-user",
+            encrypted_token="encrypted-token",
+        )
+    )
+    sqlite_session.commit()
+    factory = SQLAlchemyAccountUnitOfWorkFactory(sqlite_session_factory)
+
+    with factory() as unit_of_work:
+        integrations = unit_of_work.integrations.list_for_account("account-1")
+
+    assert len(integrations) == 1
+    assert integrations[0].provider == "github"

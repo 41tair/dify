@@ -7,6 +7,7 @@ from enums.deployment_edition import DeploymentEdition
 from extensions.ext_application_services import build_application_services
 from extensions.ext_redis import RedisClientWrapper
 from repositories.account_unit_of_work import SQLAlchemyAccountUnitOfWorkFactory
+from services.account_avatar_file_gateway import SQLAlchemyAccountAvatarFileGateway
 
 
 @pytest.mark.parametrize(
@@ -71,3 +72,8 @@ def test_build_application_services_wires_account_profile_unit_of_work(
     unit_of_work = services.accounts.profile._unit_of_work
     assert isinstance(unit_of_work, SQLAlchemyAccountUnitOfWorkFactory)
     assert unit_of_work._session_factory is sqlite_session_factory
+    assert services.accounts.integrations._unit_of_work is unit_of_work
+    assert services.accounts.password._unit_of_work is unit_of_work
+    avatar_files = services.accounts.avatar._files
+    assert isinstance(avatar_files, SQLAlchemyAccountAvatarFileGateway)
+    assert avatar_files._session_factory is sqlite_session_factory

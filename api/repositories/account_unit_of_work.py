@@ -7,8 +7,13 @@ from typing import override
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from repositories.account_integration_repository import SQLAlchemyAccountIntegrationRepository
 from repositories.account_repository import SQLAlchemyAccountRepository
-from services.account_ports import AccountRepository, AccountUnitOfWork, AccountUnitOfWorkFactory
+from services.account_ports import (
+    AccountIntegrationRepository,
+    AccountRepository,
+    AccountUnitOfWork,
+)
 
 
 class SQLAlchemyAccountUnitOfWork(AccountUnitOfWork):
@@ -16,6 +21,7 @@ class SQLAlchemyAccountUnitOfWork(AccountUnitOfWork):
         self._session_factory = session_factory
         self._session: Session | None = None
         self._accounts: AccountRepository | None = None
+        self._integrations: AccountIntegrationRepository | None = None
         self._committed = False
 
     @property
@@ -25,12 +31,20 @@ class SQLAlchemyAccountUnitOfWork(AccountUnitOfWork):
             raise RuntimeError("Account unit of work has not been entered")
         return self._accounts
 
+    @property
+    @override
+    def integrations(self) -> AccountIntegrationRepository:
+        if self._integrations is None:
+            raise RuntimeError("Account unit of work has not been entered")
+        return self._integrations
+
     @override
     def __enter__(self) -> SQLAlchemyAccountUnitOfWork:
         if self._session is not None:
             raise RuntimeError("Account unit of work cannot be entered twice")
         self._session = self._session_factory()
         self._accounts = SQLAlchemyAccountRepository(self._session)
+        self._integrations = SQLAlchemyAccountIntegrationRepository(self._session)
         return self
 
     @override
@@ -48,6 +62,7 @@ class SQLAlchemyAccountUnitOfWork(AccountUnitOfWork):
             session.close()
             self._session = None
             self._accounts = None
+            self._integrations = None
             self._committed = False
 
     @override
@@ -66,10 +81,9 @@ class SQLAlchemyAccountUnitOfWork(AccountUnitOfWork):
         return self._session
 
 
-class SQLAlchemyAccountUnitOfWorkFactory(AccountUnitOfWorkFactory):
+class SQLAlchemyAccountUnitOfWorkFactory:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
 
-    @override
     def __call__(self) -> AccountUnitOfWork:
         return SQLAlchemyAccountUnitOfWork(self._session_factory)
