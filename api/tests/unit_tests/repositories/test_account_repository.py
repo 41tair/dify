@@ -167,3 +167,34 @@ def test_unit_of_work_initializes_account_and_consumes_invitation_atomically(
     assert persisted_invitation.status == InvitationCodeStatus.USED
     assert persisted_invitation.used_by_account_id == "account-1"
     assert persisted_invitation.used_by_tenant_id == "workspace-1"
+
+
+def test_unit_of_work_updates_email_and_removes_integrations_atomically(
+    sqlite_session: Session,
+    sqlite_session_factory: sessionmaker[Session],
+) -> None:
+    _persist_account(sqlite_session)
+    integration = AccountIntegrate(
+        account_id="account-1",
+        provider="google",
+        open_id="google-user",
+        encrypted_token="encrypted-token",
+    )
+    sqlite_session.add(integration)
+    sqlite_session.commit()
+    integration_id = integration.id
+    factory = SQLAlchemyAccountUnitOfWorkFactory(sqlite_session_factory)
+
+    with factory() as unit_of_work:
+        assert unit_of_work.accounts.email_exists("new@example.com") is False
+        result = unit_of_work.accounts.update_email("account-1", "new@example.com")
+        unit_of_work.integrations.delete_for_account("account-1")
+        unit_of_work.commit()
+
+    assert result is not None
+    assert result.email == "new@example.com"
+    sqlite_session.expire_all()
+    persisted = sqlite_session.get(Account, "account-1")
+    assert persisted is not None
+    assert persisted.email == "new@example.com"
+    assert sqlite_session.get(AccountIntegrate, integration_id) is None

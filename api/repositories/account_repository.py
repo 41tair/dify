@@ -2,6 +2,7 @@
 
 from typing import override
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models.account import Account, AccountStatus
@@ -73,6 +74,19 @@ class SQLAlchemyAccountRepository(AccountRepository):
         account.timezone = initialization.timezone
         account.status = AccountStatus.ACTIVE
         account.initialized_at = initialization.initialized_at
+        self._session.flush()
+        return self._to_snapshot(account)
+
+    @override
+    def email_exists(self, email: str) -> bool:
+        return self._session.scalar(select(Account.id).where(Account.email == email).limit(1)) is not None
+
+    @override
+    def update_email(self, account_id: str, email: str) -> AccountSnapshot | None:
+        account = self._session.get(Account, account_id)
+        if account is None:
+            return None
+        account.email = email
         self._session.flush()
         return self._to_snapshot(account)
 

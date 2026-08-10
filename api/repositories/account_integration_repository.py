@@ -2,7 +2,7 @@
 
 from typing import override
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from models.account import AccountIntegrate
@@ -22,3 +22,7 @@ class SQLAlchemyAccountIntegrationRepository(AccountIntegrationRepository):
             )
         ).all()
         return [AccountIntegrationSnapshot(provider=row.provider, created_at=row.created_at) for row in rows]
+
+    @override
+    def delete_for_account(self, account_id: str) -> None:
+        self._session.execute(delete(AccountIntegrate).where(AccountIntegrate.account_id == account_id))

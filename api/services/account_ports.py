@@ -27,9 +27,15 @@ class AccountRepository(Protocol):
 
     def initialize(self, account_id: str, initialization: AccountInitialization) -> AccountSnapshot | None: ...
 
+    def email_exists(self, email: str) -> bool: ...
+
+    def update_email(self, account_id: str, email: str) -> AccountSnapshot | None: ...
+
 
 class AccountIntegrationRepository(Protocol):
     def list_for_account(self, account_id: str) -> list[AccountIntegrationSnapshot]: ...
+
+    def delete_for_account(self, account_id: str) -> None: ...
 
 
 class AccountInvitationRepository(Protocol):
@@ -105,7 +111,11 @@ class AccountInitializationUnitOfWork(AccountRepositoryUnitOfWork, Protocol):
     def invitations(self) -> AccountInvitationRepository: ...
 
 
-class AccountUnitOfWork(AccountInitializationUnitOfWork, AccountIntegrationUnitOfWork, Protocol):
+class AccountEmailUnitOfWork(AccountRepositoryUnitOfWork, AccountIntegrationUnitOfWork, Protocol):
+    """Account and integration state changed atomically during an email reset."""
+
+
+class AccountUnitOfWork(AccountInitializationUnitOfWork, AccountEmailUnitOfWork, Protocol):
     """Complete IAM account unit of work implemented by the composition root."""
 
 
