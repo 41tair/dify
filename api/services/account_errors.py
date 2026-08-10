@@ -71,3 +71,7 @@ class AccountEmailFrozenError(Exception):
 
 class AccountEmailAlreadyInUseError(Exception):
     """The target email already belongs to an account."""
+
+
+class EducationDiscountPausedError(Exception):
+    """Education discount activation is temporarily paused."""

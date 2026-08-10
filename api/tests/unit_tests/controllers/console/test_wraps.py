@@ -219,6 +219,32 @@ class TestCurrentContextInjection:
         assert result.account_id == current_user.id
         account_initialization_required.assert_not_called()
 
+    def test_console_account_admission_declares_optional_feature_gates(self):
+        with (
+            patch("controllers.console.flask_admission.setup_required", side_effect=lambda view: view),
+            patch("controllers.console.flask_admission.login_required", side_effect=lambda view: view),
+            patch("controllers.console.flask_admission.account_initialization_required", side_effect=lambda view: view),
+            patch(
+                "controllers.console.flask_admission.cloud_edition_billing_enabled",
+                side_effect=lambda view: view,
+            ) as billing_enabled,
+            patch(
+                "controllers.console.flask_admission.enable_change_email",
+                side_effect=lambda view: view,
+            ) as change_email_enabled,
+        ):
+
+            class Handler:
+                @flask_admission.console_account_admission(
+                    require_billing_enabled=True,
+                    require_change_email_enabled=True,
+                )
+                def get(self, request_context: RequestContext):
+                    return request_context
+
+        billing_enabled.assert_called_once()
+        change_email_enabled.assert_called_once()
+
     def test_with_current_tenant_id_injects_tenant_id(self):
         class Handler:
             @with_current_tenant_id

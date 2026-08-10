@@ -78,6 +78,7 @@ def test_build_application_services_wires_account_profile_unit_of_work(
     assert services.accounts.initialization._invitation_required is False
     assert services.accounts.deletion._unit_of_work is unit_of_work
     assert services.accounts.change_email._unit_of_work is unit_of_work
+    assert services.accounts.education._unit_of_work is unit_of_work
     assert services.accounts.deletion._memberships is services.workspace_queries._workspaces
     avatar_files = services.accounts.avatar._files
     assert isinstance(avatar_files, SQLAlchemyAccountAvatarFileGateway)
