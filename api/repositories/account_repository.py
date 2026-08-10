@@ -4,10 +4,11 @@ from typing import override
 
 from sqlalchemy.orm import Session
 
-from models.account import Account
+from models.account import Account, AccountStatus
 from services.account_ports import AccountRepository
 from services.entities.account_entities import (
     AccountCredentials,
+    AccountInitialization,
     AccountPasswordDigest,
     AccountProfileChanges,
     AccountSnapshot,
@@ -58,6 +59,20 @@ class SQLAlchemyAccountRepository(AccountRepository):
 
         account.password = password.password_hash
         account.password_salt = password.password_salt
+        self._session.flush()
+        return self._to_snapshot(account)
+
+    @override
+    def initialize(self, account_id: str, initialization: AccountInitialization) -> AccountSnapshot | None:
+        account = self._session.get(Account, account_id)
+        if account is None:
+            return None
+
+        account.interface_language = initialization.interface_language
+        account.interface_theme = initialization.interface_theme
+        account.timezone = initialization.timezone
+        account.status = AccountStatus.ACTIVE
+        account.initialized_at = initialization.initialized_at
         self._session.flush()
         return self._to_snapshot(account)
 

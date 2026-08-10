@@ -65,3 +65,17 @@ class AccountIntegrationStatus:
     provider: str
     created_at: datetime | None
     is_bound: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AccountInitialization:
+    interface_language: str
+    interface_theme: str
+    timezone: str
+    initialized_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AccountDeletionChallenge:
+    token: str
+    code: str

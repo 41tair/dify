@@ -8,9 +8,11 @@ from typing import override
 from sqlalchemy.orm import Session, sessionmaker
 
 from repositories.account_integration_repository import SQLAlchemyAccountIntegrationRepository
+from repositories.account_invitation_repository import SQLAlchemyAccountInvitationRepository
 from repositories.account_repository import SQLAlchemyAccountRepository
 from services.account_ports import (
     AccountIntegrationRepository,
+    AccountInvitationRepository,
     AccountRepository,
     AccountUnitOfWork,
 )
@@ -22,6 +24,7 @@ class SQLAlchemyAccountUnitOfWork(AccountUnitOfWork):
         self._session: Session | None = None
         self._accounts: AccountRepository | None = None
         self._integrations: AccountIntegrationRepository | None = None
+        self._invitations: AccountInvitationRepository | None = None
         self._committed = False
 
     @property
@@ -38,6 +41,13 @@ class SQLAlchemyAccountUnitOfWork(AccountUnitOfWork):
             raise RuntimeError("Account unit of work has not been entered")
         return self._integrations
 
+    @property
+    @override
+    def invitations(self) -> AccountInvitationRepository:
+        if self._invitations is None:
+            raise RuntimeError("Account unit of work has not been entered")
+        return self._invitations
+
     @override
     def __enter__(self) -> SQLAlchemyAccountUnitOfWork:
         if self._session is not None:
@@ -45,6 +55,7 @@ class SQLAlchemyAccountUnitOfWork(AccountUnitOfWork):
         self._session = self._session_factory()
         self._accounts = SQLAlchemyAccountRepository(self._session)
         self._integrations = SQLAlchemyAccountIntegrationRepository(self._session)
+        self._invitations = SQLAlchemyAccountInvitationRepository(self._session)
         return self
 
     @override
@@ -63,6 +74,7 @@ class SQLAlchemyAccountUnitOfWork(AccountUnitOfWork):
             self._session = None
             self._accounts = None
             self._integrations = None
+            self._invitations = None
             self._committed = False
 
     @override

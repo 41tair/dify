@@ -12,12 +12,22 @@ from core.db.session_factory import get_session_maker
 from core.schemas.schema_manager import SchemaManager
 from enums.deployment_edition import DeploymentEdition
 from extensions.ext_redis import RedisClientWrapper, redis_client
+from libs.datetime_utils import naive_utc_now
+from libs.helper import RateLimiter
 from repositories.account_unit_of_work import SQLAlchemyAccountUnitOfWorkFactory
 from repositories.installation_state_repository import InstallationStateRepository
 from repositories.workspace_member_query_repository import WorkspaceMemberQueryRepository
 from repositories.workspace_query_repository import WorkspaceQueryRepository
 from services.account_avatar_file_gateway import SQLAlchemyAccountAvatarFileGateway
 from services.account_avatar_service import AccountAvatarService
+from services.account_deletion_adapters import (
+    CeleryAccountDeletionScheduler,
+    CeleryAccountDeletionVerificationNotifier,
+    EnterpriseAccountDeletionSyncGateway,
+    TokenManagerAccountDeletionVerificationGateway,
+)
+from services.account_deletion_service import AccountDeletionService
+from services.account_initialization_service import AccountInitializationService
 from services.account_integration_service import AccountIntegrationService
 from services.account_password_hasher import LegacyAccountPasswordHasher
 from services.account_password_service import AccountPasswordService
@@ -39,6 +49,8 @@ _EXTENSION_KEY = "application_services"
 @dataclass(frozen=True, slots=True)
 class AccountApplicationServices:
     avatar: AccountAvatarService
+    deletion: AccountDeletionService
+    initialization: AccountInitializationService
     integrations: AccountIntegrationService
     password: AccountPasswordService
     profile: AccountProfileService
@@ -62,10 +74,31 @@ def build_application_services(
 ) -> ApplicationServices:
     installation_state = InstallationStateRepository(client=database_client)
     account_unit_of_work = SQLAlchemyAccountUnitOfWorkFactory(database_client)
+    workspace_query_repository = WorkspaceQueryRepository(client=database_client)
     return ApplicationServices(
         accounts=AccountApplicationServices(
             avatar=AccountAvatarService(
                 files=SQLAlchemyAccountAvatarFileGateway(session_factory=database_client),
+            ),
+            deletion=AccountDeletionService(
+                unit_of_work=account_unit_of_work,
+                memberships=workspace_query_repository,
+                verification=TokenManagerAccountDeletionVerificationGateway(),
+                notifications=CeleryAccountDeletionVerificationNotifier(
+                    rate_limiter=RateLimiter(
+                        prefix="email_code_account_deletion_rate_limit",
+                        max_attempts=1,
+                        time_window=60,
+                        redis_client=redis,
+                    )
+                ),
+                synchronization=EnterpriseAccountDeletionSyncGateway(),
+                scheduler=CeleryAccountDeletionScheduler(),
+            ),
+            initialization=AccountInitializationService(
+                unit_of_work=account_unit_of_work,
+                invitation_required=deployment_edition == DeploymentEdition.CLOUD,
+                now=naive_utc_now,
             ),
             integrations=AccountIntegrationService(unit_of_work=account_unit_of_work),
             password=AccountPasswordService(
@@ -87,9 +120,7 @@ def build_application_services(
             app_dsl_version=CURRENT_APP_DSL_VERSION,
         ),
         workspace_queries=WorkspaceQueryService(
-            workspaces=WorkspaceQueryRepository(
-                client=database_client,
-            ),
+            workspaces=workspace_query_repository,
             plans=DeploymentWorkspacePlanGateway(),
         ),
         workspace_member_queries=WorkspaceMemberQueryService(

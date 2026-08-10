@@ -211,7 +211,9 @@ class TestWorkspaceQueryRepository:
         )
         workspace_session.commit()
 
-        result = WorkspaceQueryRepository(workspace_session.session_factory).list_for_account("account-1")
+        repository = WorkspaceQueryRepository(workspace_session.session_factory)
+        result = repository.list_for_account("account-1")
+        membership_ids = repository.list_ids_for_account("account-1")
 
         assert result == (
             WorkspaceRecord(
@@ -229,6 +231,7 @@ class TestWorkspaceQueryRepository:
                 last_opened_at=None,
             ),
         )
+        assert set(membership_ids) == {earlier.id, later.id, archived.id}
 
 
 class TestDeploymentWorkspacePlanGateway:

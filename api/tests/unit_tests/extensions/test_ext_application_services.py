@@ -74,6 +74,22 @@ def test_build_application_services_wires_account_profile_unit_of_work(
     assert unit_of_work._session_factory is sqlite_session_factory
     assert services.accounts.integrations._unit_of_work is unit_of_work
     assert services.accounts.password._unit_of_work is unit_of_work
+    assert services.accounts.initialization._unit_of_work is unit_of_work
+    assert services.accounts.initialization._invitation_required is False
+    assert services.accounts.deletion._unit_of_work is unit_of_work
+    assert services.accounts.deletion._memberships is services.workspace_queries._workspaces
     avatar_files = services.accounts.avatar._files
     assert isinstance(avatar_files, SQLAlchemyAccountAvatarFileGateway)
     assert avatar_files._session_factory is sqlite_session_factory
+
+
+def test_build_application_services_requires_invitation_for_cloud_initialization(
+    sqlite_session_factory: sessionmaker[Session],
+) -> None:
+    services = build_application_services(
+        database_client=sqlite_session_factory,
+        deployment_edition=DeploymentEdition.CLOUD,
+        redis=MagicMock(spec=RedisClientWrapper),
+    )
+
+    assert services.accounts.initialization._invitation_required is True
