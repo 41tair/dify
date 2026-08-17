@@ -1,11 +1,12 @@
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from flask import request
 from flask_restx import Resource
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 from werkzeug.exceptions import NotFound, Unauthorized
 
 from configs import dify_config
@@ -20,12 +21,17 @@ from libs.passport import PassportService
 from libs.token import extract_webapp_access_token
 from models.enums import EndUserType
 from models.model import App, EndUser, Site
+from repositories.end_user_repository import create_end_user_or_get_concurrent, resolve_end_user
 from services.feature_service import FeatureService
 from services.webapp_auth_service import WebAppAuthService, WebAppAuthType
 
 
 class PassportQuery(BaseModel):
     user_id: str | None = Field(default=None, description="End user session ID")
+
+
+def _current_session() -> Session:
+    return cast(Session, db.session)
 
 
 register_schema_models(web_ns, PassportQuery)
@@ -82,33 +88,15 @@ class PassportResource(Resource):
         if not app_model or app_model.status != "normal" or not app_model.enable_site:
             raise NotFound()
 
-        if user_id:
-            end_user = db.session.scalar(
-                select(EndUser).where(EndUser.app_id == app_model.id, EndUser.session_id == user_id)
-            )
-
-            if end_user:
-                pass
-            else:
-                end_user = EndUser(
-                    tenant_id=app_model.tenant_id,
-                    app_id=app_model.id,
-                    type=EndUserType.BROWSER,
-                    is_anonymous=True,
-                    session_id=user_id,
-                )
-                db.session.add(end_user)
-                db.session.commit()
-        else:
-            end_user = EndUser(
-                tenant_id=app_model.tenant_id,
-                app_id=app_model.id,
-                type=EndUserType.BROWSER,
-                is_anonymous=True,
-                session_id=generate_session_id(),
-            )
-            db.session.add(end_user)
-            db.session.commit()
+        end_user = resolve_end_user(
+            _current_session(),
+            end_user_type=EndUserType.BROWSER,
+            tenant_id=app_model.tenant_id,
+            app_id=app_model.id,
+            user_id=user_id or generate_session_id(),
+            is_anonymous=True,
+        )
+        db.session.commit()
 
         payload = {
             "iss": site.app_id,
@@ -184,14 +172,14 @@ def exchange_token_for_existing_web_user(
     if not end_user:
         if not session_id:
             raise NotFound("Missing session_id for existing web user.")
-        end_user = EndUser(
+        end_user = resolve_end_user(
+            _current_session(),
+            end_user_type=EndUserType.BROWSER,
             tenant_id=app_model.tenant_id,
             app_id=app_model.id,
-            type=EndUserType.BROWSER,
+            user_id=session_id,
             is_anonymous=True,
-            session_id=session_id,
         )
-        db.session.add(end_user)
         db.session.commit()
 
     exp = int((datetime.now(UTC) + timedelta(minutes=dify_config.ACCESS_TOKEN_EXPIRE_MINUTES)).timestamp())
@@ -223,15 +211,14 @@ def _exchange_for_public_app_token(app_model, site, token_decoded):
         )
 
     if not end_user:
-        end_user = EndUser(
+        end_user = create_end_user_or_get_concurrent(
+            _current_session(),
+            end_user_type=EndUserType.BROWSER,
             tenant_id=app_model.tenant_id,
             app_id=app_model.id,
-            type=EndUserType.BROWSER,
             is_anonymous=True,
             session_id=generate_session_id(),
         )
-
-        db.session.add(end_user)
         db.session.commit()
 
     payload = {

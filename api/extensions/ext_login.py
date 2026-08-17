@@ -22,7 +22,6 @@ from libs.token import (
     is_admin_api_key_request,
 )
 from models import Account, Tenant, TenantAccountJoin
-from models.enums import EndUserType
 from models.model import AppMCPServer, EndUser
 from services.account_service import AccountService
 
@@ -152,7 +151,11 @@ def _load_user_from_request(request_from_flask_login: Request, session: Session)
         if not app_mcp_server:
             raise NotFound("App MCP server not found.")
         end_user = session.scalar(
-            select(EndUser).where(EndUser.session_id == app_mcp_server.id, EndUser.type == EndUserType.MCP).limit(1)
+            select(EndUser).where(
+                EndUser.tenant_id == app_mcp_server.tenant_id,
+                EndUser.app_id == app_mcp_server.app_id,
+                EndUser.session_id == app_mcp_server.id,
+            )
         )
         if not end_user:
             raise NotFound("End user not found.")

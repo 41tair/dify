@@ -116,7 +116,16 @@ def test_production_end_user_constructors_use_end_user_type_enum():
                     and isinstance(value, ast.Name)
                     and value.id == "type"
                 )
-                if not (uses_end_user_type_member or uses_end_user_service_type_parameter):
+                uses_end_user_repository_type_parameter = (
+                    source_path.relative_to(API_ROOT) == Path("repositories/end_user_repository.py")
+                    and isinstance(value, ast.Name)
+                    and value.id == "end_user_type"
+                )
+                if not (
+                    uses_end_user_type_member
+                    or uses_end_user_service_type_parameter
+                    or uses_end_user_repository_type_parameter
+                ):
                     violations.append(f"{source_path.relative_to(API_ROOT)}:{node.lineno}")
 
     assert violations == []

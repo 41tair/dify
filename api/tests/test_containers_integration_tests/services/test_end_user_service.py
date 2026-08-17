@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import logging
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from models import TenantAccountRole
@@ -163,8 +163,7 @@ class TestEndUserServiceGetOrCreateEndUserByType:
 
     This test suite covers:
     - Creating end users with different EndUserType values
-    - Type migration for legacy users
-    - Query ordering and prioritization
+    - Stable creation-source metadata for existing users
     - Session management
     """
 
@@ -218,10 +217,10 @@ class TestEndUserServiceGetOrCreateEndUserByType:
         # Assert
         assert result.type == EndUserType.BROWSER
 
-    def test_upgrade_legacy_end_user_type(
-        self, caplog: pytest.LogCaptureFixture, db_session_with_containers: Session, factory: TestEndUserServiceFactory
+    def test_existing_identity_preserves_original_type(
+        self, db_session_with_containers: Session, factory: TestEndUserServiceFactory
     ):
-        """Test upgrading legacy end user with different type."""
+        """The type records the identity's creation source and is not request state."""
         # Arrange
         app = factory.create_app_and_account(db_session_with_containers)
         tenant_id = app.tenant_id
@@ -236,30 +235,19 @@ class TestEndUserServiceGetOrCreateEndUserByType:
             session_id=user_id,
             invoke_type=EndUserType.SERVICE_API,
         )
-        with caplog.at_level(logging.INFO, logger="services.end_user_service"):
-            # Act - Request with different type
-            result = EndUserService.get_or_create_end_user_by_type(
-                type=EndUserType.BROWSER,
-                tenant_id=tenant_id,
-                app_id=app_id,
-                user_id=user_id,
-            )
+        result = EndUserService.get_or_create_end_user_by_type(
+            type=EndUserType.BROWSER,
+            tenant_id=tenant_id,
+            app_id=app_id,
+            user_id=user_id,
+        )
 
         # Assert
         assert result.id == existing_user.id
-        assert result.type == EndUserType.BROWSER  # Type should be updated
-        matching_logs = [
-            record
-            for record in caplog.records
-            if record.name == "services.end_user_service"
-            and record.levelno == logging.INFO
-            and "Upgrading legacy EndUser" in record.message
-        ]
-
-        assert len(matching_logs) == 1
+        assert result.type == EndUserType.SERVICE_API
 
     def test_get_existing_end_user_matching_type(
-        self, db_session_with_containers: Session, factory: TestEndUserServiceFactory, caplog
+        self, db_session_with_containers: Session, factory: TestEndUserServiceFactory
     ):
         """Test retrieving existing end user with matching type."""
         # Arrange
@@ -276,20 +264,16 @@ class TestEndUserServiceGetOrCreateEndUserByType:
             invoke_type=EndUserType.SERVICE_API,
         )
 
-        # Act - Request with same type
-        with caplog.at_level(logging.INFO, logger="services.end_user_service"):
-            result = EndUserService.get_or_create_end_user_by_type(
-                type=EndUserType.SERVICE_API,
-                tenant_id=tenant_id,
-                app_id=app_id,
-                user_id=user_id,
-            )
+        result = EndUserService.get_or_create_end_user_by_type(
+            type=EndUserType.SERVICE_API,
+            tenant_id=tenant_id,
+            app_id=app_id,
+            user_id=user_id,
+        )
 
         # Assert
         assert result.id == existing_user.id
         assert result.type == EndUserType.SERVICE_API
-        # No legacy-upgrade log should be emitted when the existing user's type already matches.
-        assert [record for record in caplog.records if record.levelno == logging.INFO] == []
 
     def test_create_anonymous_user_with_default_session(
         self, db_session_with_containers: Session, factory: TestEndUserServiceFactory
@@ -314,29 +298,22 @@ class TestEndUserServiceGetOrCreateEndUserByType:
         assert result._is_anonymous is True
         assert result.external_user_id == DefaultEndUserSessionID.DEFAULT_SESSION_ID
 
-    def test_query_ordering_prioritizes_matching_type(
+    def test_identity_is_reused_across_end_user_types(
         self, db_session_with_containers: Session, factory: TestEndUserServiceFactory
     ):
-        """Test that query ordering prioritizes records with matching type."""
+        """The identity key excludes type and the original creation source stays stable."""
         # Arrange
         app = factory.create_app_and_account(db_session_with_containers)
         tenant_id = app.tenant_id
         app_id = app.id
         user_id = "user-789"
 
-        non_matching = factory.create_end_user(
+        existing = factory.create_end_user(
             db_session_with_containers,
             tenant_id=tenant_id,
             app_id=app_id,
             session_id=user_id,
             invoke_type=EndUserType.BROWSER,
-        )
-        matching = factory.create_end_user(
-            db_session_with_containers,
-            tenant_id=tenant_id,
-            app_id=app_id,
-            session_id=user_id,
-            invoke_type=EndUserType.SERVICE_API,
         )
 
         # Act
@@ -348,8 +325,18 @@ class TestEndUserServiceGetOrCreateEndUserByType:
         )
 
         # Assert
-        assert result.id == matching.id
-        assert result.id != non_matching.id
+        assert result.id == existing.id
+        assert result.type == EndUserType.BROWSER
+        stored_count = db_session_with_containers.scalar(
+            select(func.count())
+            .select_from(EndUser)
+            .where(
+                EndUser.tenant_id == tenant_id,
+                EndUser.app_id == app_id,
+                EndUser.session_id == user_id,
+            )
+        )
+        assert stored_count == 1
 
     def test_external_user_id_matches_session_id(
         self, db_session_with_containers: Session, factory: TestEndUserServiceFactory
@@ -402,49 +389,6 @@ class TestEndUserServiceGetOrCreateEndUserByType:
 
         # Assert
         assert result.type == invoke_type
-
-
-class TestEndUserServiceGetEndUserById:
-    """Unit tests for EndUserService.get_end_user_by_id."""
-
-    @pytest.fixture
-    def factory(self):
-        """Provide test data factory."""
-        return TestEndUserServiceFactory()
-
-    def test_get_end_user_by_id_returns_end_user(
-        self, db_session_with_containers: Session, factory: TestEndUserServiceFactory
-    ):
-        app = factory.create_app_and_account(db_session_with_containers)
-        existing_user = factory.create_end_user(
-            db_session_with_containers,
-            tenant_id=app.tenant_id,
-            app_id=app.id,
-            session_id=f"session-{uuid4()}",
-            invoke_type=EndUserType.SERVICE_API,
-        )
-
-        result = EndUserService.get_end_user_by_id(
-            tenant_id=app.tenant_id,
-            app_id=app.id,
-            end_user_id=existing_user.id,
-        )
-
-        assert result is not None
-        assert result.id == existing_user.id
-
-    def test_get_end_user_by_id_returns_none(
-        self, db_session_with_containers: Session, factory: TestEndUserServiceFactory
-    ):
-        app = factory.create_app_and_account(db_session_with_containers)
-
-        result = EndUserService.get_end_user_by_id(
-            tenant_id=app.tenant_id,
-            app_id=app.id,
-            end_user_id=str(uuid4()),
-        )
-
-        assert result is None
 
 
 class TestEndUserServiceCreateBatch:

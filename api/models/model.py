@@ -2225,6 +2225,13 @@ class EndUser(Base, UserMixin):
     __tablename__ = "end_users"
     __table_args__ = (
         sa.PrimaryKeyConstraint("id", name="end_user_pkey"),
+        sa.Index(
+            "end_user_tenant_app_session_id_unique",
+            "tenant_id",
+            "app_id",
+            "session_id",
+            unique=True,
+        ),
         sa.Index("end_user_session_id_idx", "session_id", "type"),
         sa.Index("end_user_tenant_session_id_idx", "tenant_id", "session_id", "type"),
     )

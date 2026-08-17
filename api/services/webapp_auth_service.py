@@ -14,6 +14,7 @@ from libs.password import compare_password
 from models import Account, AccountStatus
 from models.enums import EndUserType
 from models.model import App, EndUser, Site
+from repositories.end_user_repository import create_end_user_or_get_concurrent
 from services.account_service import AccountService
 from services.app_service import AppService
 from services.enterprise.enterprise_service import PERMISSION_CHECK_MODES, EnterpriseService, WebAppAccessMode
@@ -100,16 +101,16 @@ class WebAppAuthService:
         app_model = session.get(App, site.app_id)
         if not app_model:
             raise NotFound("App not found.")
-        end_user = EndUser(
+        end_user = create_end_user_or_get_concurrent(
+            session,
+            end_user_type=EndUserType.BROWSER,
             tenant_id=app_model.tenant_id,
             app_id=app_model.id,
-            type=EndUserType.BROWSER,
             is_anonymous=False,
             session_id=email,
             name="enterpriseuser",
             external_user_id="enterpriseuser",
         )
-        session.add(end_user)
         session.commit()
 
         return end_user
