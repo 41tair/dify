@@ -5,7 +5,7 @@ retiring or replacing the gate then becomes a one-line change here.
 
 The Service API (/v1/* app-key surface) does NOT use this helper — that
 surface has its own per-request guard (``service_api_disabled``) wired
-into the legacy ``validate_app_token`` decorator.
+into the Service API admission boundary.
 """
 
 from __future__ import annotations

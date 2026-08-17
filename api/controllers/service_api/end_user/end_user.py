@@ -5,10 +5,11 @@ from flask_restx import Resource
 from controllers.common.schema import register_response_schema_models
 from controllers.service_api import service_api_ns
 from controllers.service_api.end_user.error import EndUserNotFoundError
-from controllers.service_api.wraps import validate_app_token
+from controllers.service_api.flask_admission import service_api_admission
+from extensions.ext_application_services import application_services
 from fields.end_user_fields import EndUserDetail
-from models.model import App
-from services.end_user_service import EndUserService
+from machinery.context import ServiceApiRequestContext
+from services.end_user_query_service import EndUserNotFoundError as EndUserNotFoundApplicationError
 
 register_response_schema_models(service_api_ns, EndUserDetail)
 
@@ -40,18 +41,17 @@ class EndUserApi(Resource):
         },
     )
     @service_api_ns.response(200, "End user retrieved successfully", service_api_ns.models[EndUserDetail.__name__])
-    @validate_app_token
-    def get(self, app_model: App, end_user_id: UUID):
+    @service_api_admission()
+    def get(self, request_context: ServiceApiRequestContext, end_user_id: UUID):
         """Get end user detail.
 
         This endpoint is scoped to the current app token's tenant/app to prevent
         cross-tenant/app access when an end-user ID is known.
         """
 
-        end_user = EndUserService.get_end_user_by_id(
-            tenant_id=app_model.tenant_id, app_id=app_model.id, end_user_id=str(end_user_id)
-        )
-        if end_user is None:
-            raise EndUserNotFoundError()
+        try:
+            end_user = application_services().end_user_queries.get_by_id(request_context, str(end_user_id))
+        except EndUserNotFoundApplicationError as error:
+            raise EndUserNotFoundError() from error
 
         return EndUserDetail.model_validate(end_user).model_dump(mode="json")

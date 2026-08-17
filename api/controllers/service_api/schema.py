@@ -131,7 +131,7 @@ def binary_response(namespace: Namespace, media_type: str | Sequence[str]):
 def _json_user_required(view_func) -> bool:
     fetch_from = getattr(view_func, USER_FETCH_FROM_ATTR, None)
     if fetch_from != JSON_USER_FETCH_FROM:
-        raise ValueError("JSON user documentation must match validate_app_token(fetch_user_arg=WhereisUserArg.JSON)")
+        raise ValueError("JSON user documentation must match service_api_admission(end_user=...JSON)")
 
     return bool(getattr(view_func, USER_REQUIRED_ATTR, False))
 

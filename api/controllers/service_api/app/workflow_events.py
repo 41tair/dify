@@ -2,33 +2,24 @@
 Service API workflow resume event stream endpoints.
 """
 
-import json
-from collections.abc import Generator
-
 from flask import Response, request
 from flask_restx import Resource
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import sessionmaker
 from werkzeug.exceptions import NotFound
 
 from controllers.common.fields import EventStreamResponse
 from controllers.common.schema import query_params_from_model, register_response_schema_model, register_schema_models
 from controllers.service_api import service_api_ns
 from controllers.service_api.app.error import NotWorkflowAppError
+from controllers.service_api.flask_admission import service_api_admission
 from controllers.service_api.schema import event_stream_response
-from controllers.service_api.wraps import FetchUserArg, WhereisUserArg, validate_app_token
-from core.app.apps.advanced_chat.app_generator import AdvancedChatAppGenerator
-from core.app.apps.base_app_generator import BaseAppGenerator
-from core.app.apps.common.workflow_response_converter import WorkflowResponseConverter
-from core.app.apps.message_generator import MessageGenerator
-from core.app.apps.workflow.app_generator import WorkflowAppGenerator
-from core.app.entities.task_entities import StreamEvent
-from core.workflow.human_input_policy import HumanInputSurface
-from extensions.ext_database import db
-from models.enums import CreatorUserRole
-from models.model import App, AppMode, EndUser
-from repositories.factory import DifyAPIRepositoryFactory
-from services.workflow_event_snapshot_service import build_workflow_event_stream
+from extensions.ext_application_services import application_services
+from machinery.context import ServiceApiRequestContext
+from services.entities.service_api_entities import ServiceApiEndUserRequirement, ServiceApiEndUserSource
+from services.service_api_workflow_service import (
+    ServiceApiNotWorkflowAppError,
+    ServiceApiWorkflowRunNotFoundError,
+)
 
 
 class WorkflowEventsQuery(BaseModel):
@@ -91,86 +82,25 @@ class WorkflowEventsApi(Resource):
         }
     )
     @service_api_ns.response(200, "SSE event stream", service_api_ns.models[EventStreamResponse.__name__])
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.QUERY, required=True))
-    def get(self, app_model: App, end_user: EndUser, task_id: str):
-        app_mode = AppMode.value_of(app_model.mode)
-        if app_mode not in {AppMode.WORKFLOW, AppMode.ADVANCED_CHAT}:
-            raise NotWorkflowAppError()
-
-        session_maker = sessionmaker(db.engine)
-        repo = DifyAPIRepositoryFactory.create_api_workflow_run_repository(session_maker)
-        workflow_run = repo.get_workflow_run_by_id_and_tenant_id(
-            tenant_id=app_model.tenant_id,
-            run_id=task_id,
-        )
-
-        if workflow_run is None:
-            raise NotFound("Workflow run not found")
-
-        if workflow_run.app_id != app_model.id:
-            raise NotFound("Workflow run not found")
-
-        if workflow_run.created_by_role != CreatorUserRole.END_USER:
-            raise NotFound("Workflow run not found")
-
-        if workflow_run.created_by != end_user.id:
-            raise NotFound("Workflow run not found")
-
-        workflow_run_entity = workflow_run
-
-        if workflow_run_entity.finished_at is not None:
-            response = WorkflowResponseConverter.workflow_run_result_to_finish_response(
-                task_id=workflow_run_entity.id,
-                workflow_run=workflow_run_entity,
-                creator_user=end_user,
+    @service_api_admission(
+        end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.QUERY, required=True)
+    )
+    def get(self, request_context: ServiceApiRequestContext, task_id: str):
+        query = WorkflowEventsQuery.model_validate(request.args.to_dict())
+        try:
+            events = application_services().service_api_workflows.stream_events(
+                request_context,
+                task_id=task_id,
+                include_state_snapshot=query.include_state_snapshot,
+                continue_on_pause=query.continue_on_pause,
             )
-
-            payload = response.model_dump(mode="json")
-            payload["event"] = response.event.value
-
-            def _generate_finished_events() -> Generator[str, None, None]:
-                yield f"data: {json.dumps(payload)}\n\n"
-
-            event_generator = _generate_finished_events
-        else:
-            msg_generator = MessageGenerator()
-            generator: BaseAppGenerator
-            if app_mode == AppMode.ADVANCED_CHAT:
-                generator = AdvancedChatAppGenerator()
-            elif app_mode == AppMode.WORKFLOW:
-                generator = WorkflowAppGenerator()
-            else:
-                raise NotWorkflowAppError()
-
-            include_state_snapshot = request.args.get("include_state_snapshot", "false").lower() == "true"
-            continue_on_pause = request.args.get("continue_on_pause", "false").lower() == "true"
-            terminal_events: list[StreamEvent] | None = [] if continue_on_pause else None
-
-            def _generate_stream_events():
-                if include_state_snapshot:
-                    return generator.convert_to_event_stream(
-                        build_workflow_event_stream(
-                            app_mode=app_mode,
-                            workflow_run=workflow_run_entity,
-                            tenant_id=app_model.tenant_id,
-                            app_id=app_model.id,
-                            session_maker=session_maker,
-                            human_input_surface=HumanInputSurface.SERVICE_API,
-                            close_on_pause=not continue_on_pause,
-                        )
-                    )
-                return generator.convert_to_event_stream(
-                    msg_generator.retrieve_events(
-                        app_mode,
-                        workflow_run_entity.id,
-                        terminal_events=terminal_events,
-                    ),
-                )
-
-            event_generator = _generate_stream_events
+        except ServiceApiNotWorkflowAppError as error:
+            raise NotWorkflowAppError() from error
+        except ServiceApiWorkflowRunNotFoundError as error:
+            raise NotFound("Workflow run not found") from error
 
         return Response(
-            event_generator(),
+            events,
             mimetype="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

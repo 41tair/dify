@@ -1,5 +1,6 @@
 """Tests for application-service dependency wiring."""
 
+from dataclasses import fields
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,7 +11,11 @@ from enums import DeploymentEdition
 from extensions import ext_application_services
 from extensions.ext_redis import RedisClientWrapper
 from models.model import DifySetup
+from services.app_definition_query_service import AppDefinitionQueryService
+from services.end_user_query_service import EndUserQueryService
 from services.init_validation_service import InvalidInitializationPasswordError
+from services.service_api_admission_service import ServiceApiAdmissionService
+from services.service_api_site_service import ServiceApiSiteService
 
 
 @pytest.mark.parametrize(
@@ -60,6 +65,39 @@ def test_build_application_services_passes_the_expected_password(
     services.init_validation.validate_password("expected")
     with pytest.raises(InvalidInitializationPasswordError):
         services.init_validation.validate_password("wrong")
+
+
+def test_build_application_services_wires_end_user_queries(
+    sqlite_session_factory: sessionmaker[Session],
+) -> None:
+    services = ext_application_services.build_application_services(
+        database_client=sqlite_session_factory,
+        deployment_edition=DeploymentEdition.COMMUNITY,
+        initialization_password="",
+        redis=MagicMock(spec=RedisClientWrapper),
+    )
+
+    assert isinstance(services.app_definitions, AppDefinitionQueryService)
+    assert isinstance(services.end_user_queries, EndUserQueryService)
+    assert isinstance(services.service_api_admission, ServiceApiAdmissionService)
+    assert isinstance(services.service_api_sites, ServiceApiSiteService)
+
+
+def test_application_services_exposes_service_api_domains_flat() -> None:
+    field_names = {field.name for field in fields(ext_application_services.ApplicationServices)}
+
+    assert {
+        "end_user_queries",
+        "service_api_admission",
+        "service_api_annotations",
+        "service_api_files",
+        "service_api_human_inputs",
+        "service_api_conversations",
+        "service_api_generation",
+        "service_api_sites",
+        "service_api_workflows",
+    } <= field_names
+    assert "end_users" not in field_names
 
 
 def test_init_app_registers_services_for_the_current_app(

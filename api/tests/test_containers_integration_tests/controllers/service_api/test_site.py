@@ -4,12 +4,15 @@ Testcontainers integration tests for Service API Site controller.
 
 from __future__ import annotations
 
+from inspect import unwrap
+
 import pytest
 from flask import Flask
 from sqlalchemy.orm import Session
 from werkzeug.exceptions import Forbidden
 
 from controllers.service_api.app.site import AppSiteApi
+from machinery.context import ServiceApiRequestContext
 from models.account import Tenant, TenantStatus
 from models.model import App, AppMode, Site
 
@@ -17,9 +20,6 @@ from models.model import App, AppMode, Site
 @pytest.fixture
 def app(flask_app_with_containers) -> Flask:
     return flask_app_with_containers
-
-
-from inspect import unwrap
 
 
 def _create_tenant(db_session: Session, *, status: TenantStatus = TenantStatus.NORMAL) -> Tenant:
@@ -72,7 +72,10 @@ class TestAppSiteApi:
 
         with app.test_request_context("/site", method="GET", headers={"Authorization": "Bearer test-token"}):
             api = AppSiteApi()
-            response = unwrap(api.get)(api, app_model=app_model)
+            response = unwrap(api.get)(
+                api,
+                ServiceApiRequestContext(tenant_id=tenant.id, app_id=app_model.id),
+            )
 
         assert response["title"] == "Service API Site"
         assert response["icon"] == "robot"
@@ -85,22 +88,21 @@ class TestAppSiteApi:
         with app.test_request_context("/site", method="GET", headers={"Authorization": "Bearer test-token"}):
             api = AppSiteApi()
             with pytest.raises(Forbidden):
-                unwrap(api.get)(api, app_model=app_model)
+                unwrap(api.get)(
+                    api,
+                    ServiceApiRequestContext(tenant_id=tenant.id, app_id=app_model.id),
+                )
 
-    def test_get_site_tenant_archived(self, app: Flask, db_session_with_containers: Session) -> None:
+    def test_get_site_rejects_cross_tenant_context(self, app: Flask, db_session_with_containers: Session) -> None:
         tenant = _create_tenant(db_session_with_containers)
         app_model = _create_app(db_session_with_containers, tenant.id)
         _create_site(db_session_with_containers, app_model.id)
-
-        archived_tenant = db_session_with_containers.get(Tenant, tenant.id)
-        assert archived_tenant is not None
-        archived_tenant.status = TenantStatus.ARCHIVE
-        db_session_with_containers.commit()
-
-        app_model = db_session_with_containers.get(App, app_model.id)
-        assert app_model is not None
+        other_tenant = _create_tenant(db_session_with_containers)
 
         with app.test_request_context("/site", method="GET", headers={"Authorization": "Bearer test-token"}):
             api = AppSiteApi()
             with pytest.raises(Forbidden):
-                unwrap(api.get)(api, app_model=app_model)
+                unwrap(api.get)(
+                    api,
+                    ServiceApiRequestContext(tenant_id=other_tenant.id, app_id=app_model.id),
+                )

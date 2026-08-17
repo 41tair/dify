@@ -22,6 +22,7 @@ def test_workflow_run_serializer_normalizes_status_enum() -> None:
     response = dump_response(WorkflowRunResponse, _workflow_run(WorkflowExecutionStatus.PAUSED))
 
     assert response["status"] == "paused"
+    assert response["inputs"] == "{}"
 
 
 def test_workflow_run_serializer_paused_returns_empty_outputs() -> None:

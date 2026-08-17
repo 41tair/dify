@@ -2,180 +2,34 @@ import inspect
 import logging
 import time
 from collections.abc import Callable
-from enum import StrEnum, auto
 from functools import wraps
-from typing import Protocol, cast, overload
+from typing import cast
 
 from flask import current_app, request
 from flask_login import user_logged_in
 from flask_restx import Resource
-from flask_restx.utils import merge
-from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 from werkzeug.exceptions import Forbidden, NotFound, ServiceUnavailable, Unauthorized
 
 from configs import dify_config
-from controllers.service_api.schema import (
-    USER_FETCH_FROM_ATTR,
-    USER_FORM_PARAM,
-    USER_QUERY_PARAM,
-    USER_REQUIRED_ATTR,
-)
 from enums import CloudPlan, DeploymentEdition
 from extensions.ext_database import db
 from extensions.ext_redis import redis_client
 from libs.login import current_user
 from models import Account, Tenant, TenantAccountJoin, TenantStatus
 from models.dataset import Dataset, RateLimitLog
-from models.model import ApiToken, App
+from models.model import ApiToken
 from services.api_token_service import ApiTokenCache, fetch_token_with_single_flight, record_token_usage
-from services.end_user_service import EndUserService
 from services.feature_service import FeatureService
 
 logger = logging.getLogger(__name__)
 
 
-class _RestxDocumentedView(Protocol):
-    """Callable view object carrying Flask-RESTX documentation metadata."""
-
-    __apidoc__: dict[str, object]
-
-
-class WhereisUserArg(StrEnum):
-    """
-    Enum for whereis_user_arg.
-    """
-
-    QUERY = auto()
-    JSON = auto()
-    FORM = auto()
-
-
-class FetchUserArg(BaseModel):
-    fetch_from: WhereisUserArg
-    required: bool = False
-
-
-APP_TOKEN_FORBIDDEN_RESPONSE = {
-    403: "Forbidden - token scope, app, dataset, or workspace access denied",
-}
-
 DATASET_TOKEN_AUTH_RESPONSES = {
     401: "Unauthorized - invalid API token",
     403: "Forbidden - dataset API access or workspace access denied",
 }
-
-
-def _document_app_token_contract(view_func: Callable[..., object], fetch_user_arg: FetchUserArg | None) -> None:
-    doc: dict[str, object] = {"responses": APP_TOKEN_FORBIDDEN_RESPONSE}
-    if fetch_user_arg is not None:
-        setattr(view_func, USER_FETCH_FROM_ATTR, fetch_user_arg.fetch_from.name)
-        setattr(view_func, USER_REQUIRED_ATTR, fetch_user_arg.required)
-        match fetch_user_arg.fetch_from:
-            case WhereisUserArg.QUERY:
-                doc["params"] = {"user": {**USER_QUERY_PARAM, "required": fetch_user_arg.required}}
-            case WhereisUserArg.FORM:
-                doc["params"] = {"user": {**USER_FORM_PARAM, "required": fetch_user_arg.required}}
-            case WhereisUserArg.JSON:
-                pass
-
-    cast(_RestxDocumentedView, view_func).__apidoc__ = cast(
-        dict[str, object],
-        merge(getattr(view_func, "__apidoc__", {}), doc),
-    )
-
-
-@overload
-def validate_app_token[**P, R](view: Callable[P, R]) -> Callable[P, R]: ...
-
-
-@overload
-def validate_app_token[**P, R](
-    view: None = None, *, fetch_user_arg: FetchUserArg | None = None
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
-
-
-def validate_app_token[**P, R](
-    view: Callable[P, R] | None = None, *, fetch_user_arg: FetchUserArg | None = None
-) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
-    def decorator(view_func: Callable[P, R]) -> Callable[P, R]:
-        @wraps(view_func)
-        def decorated_view(*args: P.args, **kwargs: P.kwargs) -> R:
-            api_token = validate_and_get_api_token("app")
-
-            app_model = db.session.get(App, api_token.app_id)
-            if not app_model:
-                raise Forbidden("The app no longer exists.")
-
-            if app_model.status != "normal":
-                raise Forbidden("The app's status is abnormal.")
-
-            if not app_model.enable_api:
-                raise Forbidden("The app's API service has been disabled.")
-
-            tenant = db.session.get(Tenant, app_model.tenant_id)
-            if tenant is None:
-                raise ValueError("Tenant does not exist.")
-            if tenant.status == TenantStatus.ARCHIVE:
-                raise Forbidden("The workspace's status is archived.")
-
-            kwargs["app_model"] = app_model
-
-            # If caller needs end-user context, attach EndUser to current_user
-            if fetch_user_arg:
-                user_id = None
-                match fetch_user_arg.fetch_from:
-                    case WhereisUserArg.QUERY:
-                        user_id = request.args.get("user")
-                    case WhereisUserArg.JSON:
-                        user_id = request.get_json().get("user")
-                    case WhereisUserArg.FORM:
-                        user_id = request.form.get("user")
-
-                if not user_id and fetch_user_arg.required:
-                    raise ValueError("Arg user must be provided.")
-
-                if user_id:
-                    user_id = str(user_id)
-
-                end_user = EndUserService.get_or_create_end_user(app_model, user_id)
-                kwargs["end_user"] = end_user
-
-                # Set EndUser as current logged-in user for flask_login.current_user
-                current_app.login_manager._update_request_context_with_user(end_user)  # type: ignore
-                user_logged_in.send(current_app._get_current_object(), user=end_user)  # type: ignore
-            else:
-                # For service API without end-user context, ensure an Account is logged in
-                # so services relying on current_account_with_tenant() work correctly.
-                tenant_owner_info = db.session.execute(
-                    select(Tenant, Account)
-                    .join(TenantAccountJoin, Tenant.id == TenantAccountJoin.tenant_id)
-                    .join(Account, TenantAccountJoin.account_id == Account.id)
-                    .where(
-                        Tenant.id == app_model.tenant_id,
-                        TenantAccountJoin.role == "owner",
-                        Tenant.status == TenantStatus.NORMAL,
-                    )
-                ).one_or_none()
-
-                if tenant_owner_info:
-                    tenant_model, account = tenant_owner_info
-                    account.set_current_tenant_with_session(tenant_model, session=db.session())
-                    current_app.login_manager._update_request_context_with_user(account)  # type: ignore
-                    user_logged_in.send(current_app._get_current_object(), user=current_user)  # type: ignore
-                else:
-                    raise Unauthorized("Tenant owner account not found or tenant is not active.")
-
-            return view_func(*args, **kwargs)
-
-        _document_app_token_contract(decorated_view, fetch_user_arg)
-        return decorated_view
-
-    if view is None:
-        return decorator
-    else:
-        return decorator(view)
 
 
 def cloud_edition_billing_resource_check[**P, R](
@@ -369,6 +223,7 @@ def validate_and_get_api_token(scope: str | None = None):
     The last_used_at field is updated asynchronously via Celery task
     to avoid blocking the request.
     """
+
     auth_header = request.headers.get("Authorization")
     if auth_header is None or " " not in auth_header:
         raise Unauthorized("Authorization header must be provided and start with 'Bearer'")

@@ -7,11 +7,11 @@ from controllers.common.fields import Parameters
 from controllers.common.schema import register_response_schema_models
 from controllers.service_api import service_api_ns
 from controllers.service_api.app.error import AgentNotPublishedError, AppUnavailableError
-from controllers.service_api.wraps import validate_app_token
+from controllers.service_api.flask_admission import service_api_admission
 from extensions.ext_application_services import application_services
 from fields.base import ResponseModel
 from libs.helper import dump_response
-from models.model import App
+from machinery.context import ServiceApiRequestContext
 from services.app_definition_query_service import AppDefinitionNotPublishedError, AppDefinitionUnavailableError
 
 
@@ -56,14 +56,14 @@ class AppParameterApi(Resource):
         }
     )
     @service_api_ns.response(200, "Parameters retrieved successfully", service_api_ns.models[Parameters.__name__])
-    @validate_app_token
-    def get(self, app_model: App):
+    @service_api_admission()
+    def get(self, request_context: ServiceApiRequestContext):
         """Retrieve app parameters.
 
         Returns the input form parameters and configuration for the application.
         """
         try:
-            parameters = application_services().app_definitions.get_public_parameters(app_model.id)
+            parameters = application_services().app_definitions.get_public_parameters(request_context.app_id)
         except AppDefinitionNotPublishedError:
             raise AgentNotPublishedError() from None
         except AppDefinitionUnavailableError:
@@ -92,14 +92,14 @@ class AppMetaApi(Resource):
         }
     )
     @service_api_ns.response(200, "Metadata retrieved successfully", service_api_ns.models[AppMetaResponse.__name__])
-    @validate_app_token
-    def get(self, app_model: App):
+    @service_api_admission()
+    def get(self, request_context: ServiceApiRequestContext):
         """Get app metadata.
 
         Returns metadata about the application including configuration and settings.
         """
         try:
-            tool_icons = application_services().app_definitions.get_tool_icons(app_model.id)
+            tool_icons = application_services().app_definitions.get_tool_icons(request_context.app_id)
         except AppDefinitionUnavailableError:
             raise AppUnavailableError() from None
 
@@ -130,14 +130,14 @@ class AppInfoApi(Resource):
         "Application info retrieved successfully",
         service_api_ns.models[AppInfoResponse.__name__],
     )
-    @validate_app_token
-    def get(self, app_model: App):
+    @service_api_admission()
+    def get(self, request_context: ServiceApiRequestContext):
         """Get app information.
 
         Returns basic information about the application including name, description, tags, and mode.
         """
         try:
-            summary = application_services().app_definitions.get_summary(app_model.id)
+            summary = application_services().app_definitions.get_summary(request_context.app_id)
         except AppDefinitionUnavailableError:
             raise AppUnavailableError() from None
         return dump_response(AppInfoResponse, summary)

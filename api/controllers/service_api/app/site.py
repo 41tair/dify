@@ -1,14 +1,13 @@
 from flask_restx import Resource
-from sqlalchemy import select
 from werkzeug.exceptions import Forbidden
 
 from controllers.common.fields import Site as SiteResponse
 from controllers.common.schema import register_response_schema_models
 from controllers.service_api import service_api_ns
-from controllers.service_api.wraps import validate_app_token
-from extensions.ext_database import db
-from models.account import TenantStatus
-from models.model import App, Site
+from controllers.service_api.flask_admission import service_api_admission
+from extensions.ext_application_services import application_services
+from machinery.context import ServiceApiRequestContext
+from services.service_api_site_service import ServiceApiSiteForbiddenError
 
 register_response_schema_models(service_api_ns, SiteResponse)
 
@@ -43,19 +42,14 @@ class AppSiteApi(Resource):
         "Site configuration retrieved successfully",
         service_api_ns.models[SiteResponse.__name__],
     )
-    @validate_app_token
-    def get(self, app_model: App):
+    @service_api_admission()
+    def get(self, request_context: ServiceApiRequestContext):
         """Retrieve app site info.
 
         Returns the site configuration for the application including theme, icons, and text.
         """
-        site = db.session.scalar(select(Site).where(Site.app_id == app_model.id).limit(1))
-
-        if not site:
-            raise Forbidden()
-
-        assert app_model.tenant
-        if app_model.tenant.status == TenantStatus.ARCHIVE:
-            raise Forbidden()
-
-        return SiteResponse.model_validate(site).model_dump(mode="json")
+        try:
+            site = application_services().service_api_sites.get_site(request_context)
+        except ServiceApiSiteForbiddenError as error:
+            raise Forbidden() from error
+        return SiteResponse.model_validate(site, from_attributes=True).model_dump(mode="json")

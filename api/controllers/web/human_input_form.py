@@ -14,7 +14,7 @@ from werkzeug.exceptions import Forbidden
 
 from configs import dify_config
 from controllers.common.errors import NotFoundError
-from controllers.common.human_input import HumanInputFormSubmitPayload, stringify_form_default_values
+from controllers.common.human_input import HumanInputFormSubmitPayload
 from controllers.common.schema import register_response_schema_models, register_schema_models
 from controllers.console.wraps import model_validate
 from controllers.web import web_ns
@@ -27,6 +27,7 @@ from libs.helper import RateLimiter, dump_response, extract_remote_ip, to_timest
 from models.account import TenantStatus
 from models.model import App, AppMode, Site
 from repositories.factory import DifyAPIRepositoryFactory
+from services.entities.human_input_entities import stringify_form_default_values
 from services.feature_service import FeatureService
 from services.human_input_file_upload_service import HumanInputFileUploadService
 from services.human_input_service import Form, FormNotFoundError, HumanInputService

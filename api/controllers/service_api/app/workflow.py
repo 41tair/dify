@@ -1,17 +1,13 @@
 import logging
-from collections.abc import Mapping
-from datetime import datetime
 from typing import Literal
 
 from dateutil.parser import isoparse
 from flask import request
 from flask_restx import Resource
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
-from sqlalchemy.orm import Session, sessionmaker
 from werkzeug.exceptions import BadRequest, InternalServerError, NotFound
 
-from configs import dify_config
 from controllers.common.controller_schemas import WorkflowRunPayload as WorkflowRunPayloadBase
 from controllers.common.fields import GeneratedAppResponse, SimpleResultResponse
 from controllers.common.schema import (
@@ -20,7 +16,6 @@ from controllers.common.schema import (
     register_response_schema_models,
     register_schema_models,
 )
-from controllers.console.app.wraps import with_session
 from controllers.service_api import service_api_ns
 from controllers.service_api.app.error import (
     CompletionRequestError,
@@ -30,39 +25,37 @@ from controllers.service_api.app.error import (
     ProviderQuotaExceededError,
     WorkflowVersionExecutionNotAllowedError,
 )
+from controllers.service_api.flask_admission import service_api_admission
 from controllers.service_api.schema import (
     expect_user_json,
     expect_with_user,
     json_or_event_stream_response,
 )
-from controllers.service_api.wraps import FetchUserArg, WhereisUserArg, validate_app_token
 from controllers.web.error import InvokeRateLimitError as InvokeRateLimitHttpError
-from core.app.apps.base_app_queue_manager import AppQueueManager
-from core.app.entities.app_invoke_entities import InvokeFrom
 from core.errors.error import (
     ModelCurrentlyNotSupportError,
     ProviderTokenNotInitError,
     QuotaExceededError,
 )
 from core.helper.trace_id_helper import get_external_trace_id, get_trace_session_id, omit_trace_session_id_from_payload
-from enums import CloudPlan, DeploymentEdition
-from extensions.ext_database import db
-from extensions.ext_redis import redis_client
-from fields.base import ResponseModel
-from fields.end_user_fields import SimpleEndUser
-from fields.member_fields import SimpleAccountResponse
-from graphon.enums import WorkflowExecutionStatus
-from graphon.graph_engine.manager import GraphEngineManager
+from extensions.ext_application_services import application_services
+from fields.service_api_workflow_fields import (
+    WorkflowAppLogPaginationResponse,
+    WorkflowAppLogPartialResponse,
+    WorkflowRunForLogResponse,
+    WorkflowRunResponse,
+)
 from graphon.model_runtime.errors.invoke import InvokeError
 from libs import helper
-from libs.helper import dump_response, to_timestamp
-from models.model import App, AppMode, EndUser
-from repositories.factory import DifyAPIRepositoryFactory
-from services.app_generate_service import AppGenerateService
-from services.billing_service import BillingService
+from machinery.context import ServiceApiRequestContext
+from services.entities.service_api_entities import ServiceApiEndUserRequirement, ServiceApiEndUserSource
 from services.errors.app import IsDraftWorkflowError, WorkflowIdFormatError, WorkflowNotFoundError
 from services.errors.llm import InvokeRateLimitError
-from services.workflow_app_service import WorkflowAppService
+from services.service_api_workflow_service import (
+    ServiceApiNotWorkflowAppError,
+    ServiceApiWorkflowRunNotFoundError,
+    ServiceApiWorkflowVersionNotAllowedError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,104 +102,6 @@ register_schema_models(service_api_ns, WorkflowRunPayload, WorkflowLogQuery)
 register_response_schema_models(service_api_ns, GeneratedAppResponse, SimpleResultResponse)
 
 
-def _enum_value(value):
-    return getattr(value, "value", value)
-
-
-class WorkflowRunResponse(ResponseModel):
-    id: str
-    workflow_id: str
-    status: str
-    inputs: dict | list | str | int | float | bool | None = Field(default=None)
-    outputs: dict = Field(default_factory=dict, validation_alias="outputs_dict")
-    error: str | None = None
-    total_steps: int | None = None
-    total_tokens: int | None = None
-    created_at: int | None = None
-    finished_at: int | None = None
-    elapsed_time: float | int | None = None
-
-    @field_validator("status", mode="before")
-    @classmethod
-    def _normalize_enum(cls, value):
-        return _enum_value(value)
-
-    @field_validator("outputs", mode="before")
-    @classmethod
-    def _normalize_outputs(cls, value):
-        if value is None:
-            return {}
-        if isinstance(value, dict):
-            return value
-        if isinstance(value, Mapping):
-            return dict(value)
-        return {}
-
-    @field_validator("created_at", "finished_at", mode="before")
-    @classmethod
-    def _normalize_timestamp(cls, value: datetime | int | None) -> int | None:
-        return to_timestamp(value)
-
-    @model_validator(mode="after")
-    def _clear_paused_outputs(self):
-        if self.status == WorkflowExecutionStatus.PAUSED.value:
-            self.outputs = {}
-        return self
-
-
-class WorkflowRunForLogResponse(ResponseModel):
-    id: str
-    version: str | None = None
-    status: str | None = None
-    triggered_from: str | None = None
-    error: str | None = None
-    elapsed_time: float | int | None = None
-    total_tokens: int | None = None
-    total_steps: int | None = None
-    created_at: int | None = None
-    finished_at: int | None = None
-    exceptions_count: int | None = None
-
-    @field_validator("status", "triggered_from", mode="before")
-    @classmethod
-    def _normalize_enum(cls, value):
-        return _enum_value(value)
-
-    @field_validator("created_at", "finished_at", mode="before")
-    @classmethod
-    def _normalize_timestamp(cls, value: datetime | int | None) -> int | None:
-        return to_timestamp(value)
-
-
-class WorkflowAppLogPartialResponse(ResponseModel):
-    id: str
-    workflow_run: WorkflowRunForLogResponse | None = None
-    details: dict | list | str | int | float | bool | None = Field(default=None)
-    created_from: str | None = None
-    created_by_role: str | None = None
-    created_by_account: SimpleAccountResponse | None = None
-    created_by_end_user: SimpleEndUser | None = None
-    created_at: int | None = None
-
-    @field_validator("created_from", "created_by_role", mode="before")
-    @classmethod
-    def _normalize_enum(cls, value):
-        return _enum_value(value)
-
-    @field_validator("created_at", mode="before")
-    @classmethod
-    def _normalize_timestamp(cls, value: datetime | int | None) -> int | None:
-        return to_timestamp(value)
-
-
-class WorkflowAppLogPaginationResponse(ResponseModel):
-    page: int
-    limit: int
-    total: int
-    has_more: bool
-    data: list[WorkflowAppLogPartialResponse]
-
-
 register_response_schema_models(
     service_api_ns,
     WorkflowRunResponse,
@@ -242,33 +137,27 @@ class WorkflowRunDetailApi(Resource):
             404: "Workflow run not found",
         }
     )
-    @validate_app_token
+    @service_api_admission()
     @service_api_ns.response(
         200,
         "Workflow run details retrieved successfully",
         service_api_ns.models[WorkflowRunResponse.__name__],
     )
-    def get(self, app_model: App, workflow_run_id: str):
+    def get(self, request_context: ServiceApiRequestContext, workflow_run_id: str):
         """Get a workflow task running detail.
 
         Returns detailed information about a specific workflow run.
         """
-        app_mode = AppMode.value_of(app_model.mode)
-        if app_mode not in [AppMode.WORKFLOW, AppMode.ADVANCED_CHAT]:
-            raise NotWorkflowAppError()
-
-        # Use repository to get workflow run
-        session_maker = sessionmaker(bind=db.engine, expire_on_commit=False)
-        workflow_run_repo = DifyAPIRepositoryFactory.create_api_workflow_run_repository(session_maker)
-
-        workflow_run = workflow_run_repo.get_workflow_run_by_id(
-            tenant_id=app_model.tenant_id,
-            app_id=app_model.id,
-            run_id=workflow_run_id,
-        )
-        if not workflow_run:
-            raise NotFound("Workflow run not found.")
-        return dump_response(WorkflowRunResponse, workflow_run)
+        try:
+            result = application_services().service_api_workflows.get_run(
+                request_context,
+                workflow_run_id=workflow_run_id,
+            )
+        except ServiceApiNotWorkflowAppError as error:
+            raise NotWorkflowAppError() from error
+        except ServiceApiWorkflowRunNotFoundError as error:
+            raise NotFound("Workflow run not found.") from error
+        return WorkflowRunResponse.model_validate(result).model_dump(mode="json")
 
 
 @service_api_ns.route("/workflows/run")
@@ -321,18 +210,15 @@ class WorkflowRunApi(Resource):
         "Workflow executed successfully",
         service_api_ns.models[GeneratedAppResponse.__name__],
     )
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.JSON, required=True))
-    @with_session
-    def post(self, session: Session, app_model: App, end_user: EndUser):
+    @service_api_admission(
+        end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.JSON, required=True)
+    )
+    def post(self, request_context: ServiceApiRequestContext):
         """Execute a workflow.
 
         Runs a workflow with the provided inputs and returns the results.
         Supports both blocking and streaming response modes.
         """
-        app_mode = AppMode.value_of(app_model.mode)
-        if app_mode != AppMode.WORKFLOW:
-            raise NotWorkflowAppError()
-
         payload = WorkflowRunPayload.model_validate(omit_trace_session_id_from_payload(service_api_ns.payload) or {})
         args = payload.model_dump(exclude_none=True)
         trace_session_id = get_trace_session_id(request)
@@ -344,17 +230,17 @@ class WorkflowRunApi(Resource):
         streaming = payload.response_mode == "streaming"
 
         try:
-            response = AppGenerateService.generate(
-                session=session,
-                app_model=app_model,
-                user=end_user,
+            response = application_services().service_api_workflows.run(
+                request_context,
                 args=args,
-                invoke_from=InvokeFrom.SERVICE_API,
                 streaming=streaming,
+                workflow_id=None,
             )
 
             # response-contract:ignore compact_generate_response
             return helper.compact_generate_response(response)
+        except ServiceApiNotWorkflowAppError as error:
+            raise NotWorkflowAppError() from error
         except ProviderTokenNotInitError as ex:
             raise ProviderNotInitializeError(ex.description)
         except QuotaExceededError:
@@ -440,22 +326,14 @@ class WorkflowRunByIdApi(Resource):
         "Workflow executed successfully",
         service_api_ns.models[GeneratedAppResponse.__name__],
     )
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.JSON, required=True))
-    @with_session
-    def post(self, session: Session, app_model: App, end_user: EndUser, workflow_id: str):
+    @service_api_admission(
+        end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.JSON, required=True)
+    )
+    def post(self, request_context: ServiceApiRequestContext, workflow_id: str):
         """Run specific workflow by ID.
 
         Executes a specific workflow version identified by its ID.
         """
-        app_mode = AppMode.value_of(app_model.mode)
-        if app_mode != AppMode.WORKFLOW:
-            raise NotWorkflowAppError()
-
-        if dify_config.DEPLOYMENT_EDITION == DeploymentEdition.CLOUD:
-            billing_info = BillingService.get_info(app_model.tenant_id, exclude_vector_space=True)
-            if billing_info["enabled"] and billing_info["subscription"]["plan"] == CloudPlan.SANDBOX:
-                raise WorkflowVersionExecutionNotAllowedError()
-
         payload = WorkflowRunPayload.model_validate(omit_trace_session_id_from_payload(service_api_ns.payload) or {})
         args = payload.model_dump(exclude_none=True)
         trace_session_id = get_trace_session_id(request)
@@ -471,17 +349,19 @@ class WorkflowRunByIdApi(Resource):
         streaming = payload.response_mode == "streaming"
 
         try:
-            response = AppGenerateService.generate(
-                session=session,
-                app_model=app_model,
-                user=end_user,
+            response = application_services().service_api_workflows.run(
+                request_context,
                 args=args,
-                invoke_from=InvokeFrom.SERVICE_API,
                 streaming=streaming,
+                workflow_id=workflow_id,
             )
 
             # response-contract:ignore compact_generate_response
             return helper.compact_generate_response(response)
+        except ServiceApiNotWorkflowAppError as error:
+            raise NotWorkflowAppError() from error
+        except ServiceApiWorkflowVersionNotAllowedError as error:
+            raise WorkflowVersionExecutionNotAllowedError() from error
         except WorkflowNotFoundError as ex:
             raise NotFound(str(ex))
         except IsDraftWorkflowError as ex:
@@ -532,19 +412,15 @@ class WorkflowTaskStopApi(Resource):
         }
     )
     @service_api_ns.response(200, "Task stopped successfully", service_api_ns.models[SimpleResultResponse.__name__])
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.JSON, required=True))
-    def post(self, app_model: App, end_user: EndUser, task_id: str):
+    @service_api_admission(
+        end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.JSON, required=True)
+    )
+    def post(self, request_context: ServiceApiRequestContext, task_id: str):
         """Stop a running workflow task."""
-        app_mode = AppMode.value_of(app_model.mode)
-        if app_mode != AppMode.WORKFLOW:
-            raise NotWorkflowAppError()
-
-        # Stop using both mechanisms for backward compatibility
-        # Legacy stop flag mechanism (without user check)
-        AppQueueManager.set_stop_flag_no_user_check(task_id)
-
-        # New graph engine command channel mechanism
-        GraphEngineManager(redis_client).send_stop_command(task_id)
+        try:
+            application_services().service_api_workflows.stop(request_context, task_id=task_id)
+        except ServiceApiNotWorkflowAppError as error:
+            raise NotWorkflowAppError() from error
 
         return SimpleResultResponse(result="success").model_dump()
 
@@ -568,31 +444,27 @@ class WorkflowAppLogApi(Resource):
             401: "Unauthorized - invalid API token",
         }
     )
-    @validate_app_token
+    @service_api_admission()
     @service_api_ns.response(
         200,
         "Logs retrieved successfully",
         service_api_ns.models[WorkflowAppLogPaginationResponse.__name__],
     )
-    def get(self, app_model: App):
+    def get(self, request_context: ServiceApiRequestContext):
         """Get workflow app logs.
 
         Returns paginated workflow execution logs with filtering options.
         """
         args = query_params_from_request(WorkflowLogQuery)
 
-        status = WorkflowExecutionStatus(args.status) if args.status else None
         created_at_before = isoparse(args.created_at__before) if args.created_at__before else None
         created_at_after = isoparse(args.created_at__after) if args.created_at__after else None
 
-        # get paginate workflow app logs
-        workflow_app_service = WorkflowAppService()
-        with sessionmaker(db.engine).begin() as session:
-            workflow_app_log_pagination = workflow_app_service.get_paginate_workflow_app_logs(
-                session=session,
-                app_model=app_model,
+        try:
+            workflow_app_log_pagination = application_services().service_api_workflows.list_logs(
+                request_context,
                 keyword=args.keyword,
-                status=status,
+                status=args.status,
                 created_at_before=created_at_before,
                 created_at_after=created_at_after,
                 page=args.page,
@@ -600,5 +472,6 @@ class WorkflowAppLogApi(Resource):
                 created_by_end_user_session_id=args.created_by_end_user_session_id,
                 created_by_account=args.created_by_account,
             )
-
-            return dump_response(WorkflowAppLogPaginationResponse, workflow_app_log_pagination)
+        except ServiceApiNotWorkflowAppError as error:
+            raise NotWorkflowAppError() from error
+        return WorkflowAppLogPaginationResponse.model_validate(workflow_app_log_pagination).model_dump(mode="json")

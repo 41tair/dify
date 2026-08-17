@@ -1,5 +1,5 @@
 """
-Unit tests for Service API wraps (authentication decorators)
+Unit tests for Service API admission and remaining request wrappers.
 """
 
 import uuid
@@ -14,13 +14,10 @@ from werkzeug.exceptions import Forbidden, NotFound, ServiceUnavailable, Unautho
 
 from controllers.service_api.wraps import (
     DatasetApiResource,
-    FetchUserArg,
-    WhereisUserArg,
     cloud_edition_billing_knowledge_limit_check,
     cloud_edition_billing_rate_limit_check,
     cloud_edition_billing_resource_check,
     validate_and_get_api_token,
-    validate_app_token,
     validate_dataset_token,
 )
 from enums import CloudPlan, DeploymentEdition
@@ -28,7 +25,7 @@ from models import Account, Tenant, TenantAccountJoin
 from models.account import TenantAccountRole
 from models.dataset import Dataset, RateLimitLog
 from models.enums import ApiTokenType
-from models.model import ApiToken, App, AppMode, IconType
+from models.model import ApiToken
 
 
 def _configure_current_app_mock(mock_current_app):
@@ -65,20 +62,6 @@ def _persist_workspace(session: Session) -> tuple[Tenant, Account, TenantAccount
     session.add_all([tenant, account, membership])
     session.commit()
     return tenant, account, membership
-
-
-def _app_model(*, tenant_id: str, enable_api: bool = True) -> App:
-    return App(
-        id=str(uuid.uuid4()),
-        tenant_id=tenant_id,
-        name="Service API App",
-        mode=AppMode.CHAT,
-        icon_type=IconType.EMOJI,
-        icon="chat",
-        icon_background="#FFFFFF",
-        enable_site=False,
-        enable_api=enable_api,
-    )
 
 
 class TestValidateAndGetApiToken:
@@ -154,140 +137,6 @@ class TestValidateAndGetApiToken:
             with pytest.raises(Unauthorized) as exc_info:
                 validate_and_get_api_token("app")
             assert "Access token is invalid" in str(exc_info.value)
-
-
-class TestValidateAppToken:
-    """Test suite for validate_app_token decorator"""
-
-    @pytest.fixture
-    def app(self):
-        """Create Flask test application."""
-        app = Flask(__name__)
-        app.config["TESTING"] = True
-        return app
-
-    @patch("controllers.service_api.wraps.user_logged_in")
-    @patch("controllers.service_api.wraps.validate_and_get_api_token")
-    @patch("controllers.service_api.wraps.current_app")
-    @pytest.mark.parametrize(
-        "sqlite_session",
-        [(App, ApiToken, Tenant, Account, TenantAccountJoin)],
-        indirect=True,
-    )
-    def test_valid_app_token_allows_access(
-        self,
-        mock_current_app,
-        mock_validate_token,
-        mock_user_logged_in,
-        app: Flask,
-        sqlite_session: Session,
-    ):
-        """Test that valid app token allows access to decorated view."""
-        # Arrange
-        _configure_current_app_mock(mock_current_app)
-
-        tenant, account, _ = _persist_workspace(sqlite_session)
-        app_model = _app_model(tenant_id=tenant.id)
-        api_token = _api_token(tenant_id=tenant.id, app_id=app_model.id, token_type=ApiTokenType.APP)
-        sqlite_session.add_all([app_model, api_token])
-        sqlite_session.commit()
-        mock_validate_token.return_value = api_token
-
-        @validate_app_token
-        def protected_view(app_model):
-            return {"success": True, "app_id": app_model.id}
-
-        # Act
-        with (
-            app.test_request_context("/", method="GET", headers={"Authorization": "Bearer test_token"}),
-            patch("controllers.service_api.wraps.db.session", _session_proxy(sqlite_session)),
-        ):
-            result = protected_view()
-
-        # Assert
-        assert result["success"] is True
-        assert result["app_id"] == app_model.id
-        assert account.current_tenant_id == tenant.id
-
-    @patch("controllers.service_api.wraps.validate_and_get_api_token")
-    @pytest.mark.parametrize("sqlite_session", [(App,)], indirect=True)
-    def test_app_not_found_raises_forbidden(self, mock_validate_token, app: Flask, sqlite_session: Session):
-        """Test that Forbidden is raised when app no longer exists."""
-        # Arrange
-        api_token = _api_token(
-            tenant_id=str(uuid.uuid4()),
-            app_id=str(uuid.uuid4()),
-            token_type=ApiTokenType.APP,
-        )
-        mock_validate_token.return_value = api_token
-
-        @validate_app_token
-        def protected_view(**kwargs):
-            return {"success": True}
-
-        # Act & Assert
-        with (
-            app.test_request_context("/", method="GET"),
-            patch("controllers.service_api.wraps.db.session", sqlite_session),
-        ):
-            with pytest.raises(Forbidden) as exc_info:
-                protected_view()
-            assert "no longer exists" in str(exc_info.value)
-
-    @patch("controllers.service_api.wraps.validate_and_get_api_token")
-    @pytest.mark.parametrize("sqlite_session", [(App,)], indirect=True)
-    def test_app_status_abnormal_raises_forbidden(self, mock_validate_token, app: Flask, sqlite_session: Session):
-        """Test that Forbidden is raised when app status is abnormal."""
-        # Arrange
-        app_model = _app_model(tenant_id=str(uuid.uuid4()))
-        sqlite_session.add(app_model)
-        sqlite_session.commit()
-        app_model.status = "abnormal"
-        mock_validate_token.return_value = _api_token(
-            tenant_id=app_model.tenant_id,
-            app_id=app_model.id,
-            token_type=ApiTokenType.APP,
-        )
-
-        @validate_app_token
-        def protected_view(**kwargs):
-            return {"success": True}
-
-        # Act & Assert
-        with (
-            app.test_request_context("/", method="GET"),
-            patch("controllers.service_api.wraps.db.session", sqlite_session),
-        ):
-            with pytest.raises(Forbidden) as exc_info:
-                protected_view()
-            assert "status is abnormal" in str(exc_info.value)
-
-    @patch("controllers.service_api.wraps.validate_and_get_api_token")
-    @pytest.mark.parametrize("sqlite_session", [(App,)], indirect=True)
-    def test_app_api_disabled_raises_forbidden(self, mock_validate_token, app: Flask, sqlite_session: Session):
-        """Test that Forbidden is raised when app API is disabled."""
-        # Arrange
-        app_model = _app_model(tenant_id=str(uuid.uuid4()), enable_api=False)
-        sqlite_session.add(app_model)
-        sqlite_session.commit()
-        mock_validate_token.return_value = _api_token(
-            tenant_id=app_model.tenant_id,
-            app_id=app_model.id,
-            token_type=ApiTokenType.APP,
-        )
-
-        @validate_app_token
-        def protected_view(**kwargs):
-            return {"success": True}
-
-        # Act & Assert
-        with (
-            app.test_request_context("/", method="GET"),
-            patch("controllers.service_api.wraps.db.session", sqlite_session),
-        ):
-            with pytest.raises(Forbidden) as exc_info:
-                protected_view()
-            assert "API service has been disabled" in str(exc_info.value)
 
 
 class TestCloudEditionBillingResourceCheck:
@@ -703,28 +552,6 @@ class TestValidateDatasetToken:
             with pytest.raises(NotFound) as exc_info:
                 protected_view(dataset_id=str(uuid.uuid4()))
             assert "Dataset not found" in str(exc_info.value)
-
-
-class TestFetchUserArg:
-    """Test suite for FetchUserArg model"""
-
-    def test_fetch_user_arg_defaults(self):
-        """Test FetchUserArg default values."""
-        # Arrange & Act
-        arg = FetchUserArg(fetch_from=WhereisUserArg.JSON)
-
-        # Assert
-        assert arg.fetch_from == WhereisUserArg.JSON
-        assert arg.required is False
-
-    def test_fetch_user_arg_required(self):
-        """Test FetchUserArg with required=True."""
-        # Arrange & Act
-        arg = FetchUserArg(fetch_from=WhereisUserArg.QUERY, required=True)
-
-        # Assert
-        assert arg.fetch_from == WhereisUserArg.QUERY
-        assert arg.required is True
 
 
 class TestDatasetApiResource:

@@ -1,299 +1,162 @@
-"""
-Unit tests for Service API Annotation controller.
-
-Tests coverage for:
-- AnnotationCreatePayload Pydantic model validation
-- AnnotationReplyActionPayload Pydantic model validation
-- Error patterns and validation logic
-
-Note: API endpoint tests for annotation controllers are complex due to:
-- @validate_app_token decorator requiring full Flask-SQLAlchemy setup
-- @edit_permission_required decorator checking current_user permissions
-- These are better covered by integration tests
-"""
-
-import uuid
+from datetime import UTC, datetime
 from inspect import unwrap
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from flask import Flask
-from flask_restx.api import HTTPStatus
 from pydantic import ValidationError
+from werkzeug.exceptions import NotFound
 
 from controllers.service_api.app.annotation import (
     AnnotationCreatePayload,
     AnnotationListApi,
-    AnnotationListQuery,
     AnnotationReplyActionApi,
     AnnotationReplyActionPayload,
-    AnnotationReplyActionStatusApi,
     AnnotationUpdateDeleteApi,
 )
-from extensions.ext_redis import redis_client
-from models.model import App
-from services.annotation_service import AppAnnotationService
+from machinery.context import ServiceApiRequestContext
+from services.service_api_annotation_service import (
+    ServiceApiAnnotation,
+    ServiceApiAnnotationNotFoundError,
+    ServiceApiAnnotationPage,
+)
 
 
-class TestAnnotationCreatePayload:
-    """Test suite for AnnotationCreatePayload Pydantic model."""
-
-    def test_payload_with_question_and_answer(self):
-        """Test payload with required fields."""
-        payload = AnnotationCreatePayload(question="What is AI?", answer="AI is artificial intelligence.")
-        assert payload.question == "What is AI?"
-        assert payload.answer == "AI is artificial intelligence."
-
-    def test_payload_with_unicode_content(self):
-        """Test payload with unicode content."""
-        payload = AnnotationCreatePayload(question="什么是人工智能？", answer="人工智能是模拟人类智能的技术。")
-        assert payload.question == "什么是人工智能？"
-
-    def test_payload_with_special_characters(self):
-        """Test payload with special characters."""
-        payload = AnnotationCreatePayload(
-            question="What is <b>AI</b>?", answer="AI & ML are related fields with 100% growth!"
-        )
-        assert "<b>" in payload.question
+@pytest.fixture
+def flask_app() -> Flask:
+    app = Flask(__name__)
+    app.config["TESTING"] = True
+    return app
 
 
-class TestAnnotationReplyActionPayload:
-    """Test suite for AnnotationReplyActionPayload Pydantic model."""
-
-    def test_payload_with_all_fields(self):
-        """Test payload with all fields."""
-        payload = AnnotationReplyActionPayload(
-            score_threshold=0.8, embedding_provider_name="openai", embedding_model_name="text-embedding-ada-002"
-        )
-        assert payload.score_threshold == 0.8
-        assert payload.embedding_provider_name == "openai"
-        assert payload.embedding_model_name == "text-embedding-ada-002"
-
-    def test_payload_with_different_provider(self):
-        """Test payload with different embedding provider."""
-        payload = AnnotationReplyActionPayload(
-            score_threshold=0.75, embedding_provider_name="azure_openai", embedding_model_name="text-embedding-3-small"
-        )
-        assert payload.embedding_provider_name == "azure_openai"
-
-    def test_payload_with_zero_threshold(self):
-        """Test payload with zero score threshold."""
-        payload = AnnotationReplyActionPayload(
-            score_threshold=0.0, embedding_provider_name="local", embedding_model_name="default"
-        )
-        assert payload.score_threshold == 0.0
+def _context() -> ServiceApiRequestContext:
+    return ServiceApiRequestContext(tenant_id="tenant-1", app_id="app-1")
 
 
-class TestAnnotationListQuery:
-    def test_defaults(self) -> None:
-        query = AnnotationListQuery.model_validate({})
-        assert query.page == 1
-        assert query.limit == 20
-        assert query.keyword == ""
-
-    def test_valid_numeric_strings(self) -> None:
-        query = AnnotationListQuery.model_validate({"page": "2", "limit": "5", "keyword": "refund"})
-        assert query.page == 2
-        assert query.limit == 5
-        assert query.keyword == "refund"
-
-    @pytest.mark.parametrize("field", ["page", "limit"])
-    @pytest.mark.parametrize("value", ["abc", "1.5", "1e2", "", "0", "-1"])
-    def test_invalid_explicit_pagination_value(self, field: str, value: str) -> None:
-        with pytest.raises(ValidationError):
-            AnnotationListQuery.model_validate({field: value})
+def _annotation() -> ServiceApiAnnotation:
+    return ServiceApiAnnotation(
+        id="annotation-1",
+        question="question",
+        content="answer",
+        hit_count=0,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
 
 
-class TestAppModelPatterns:
-    """Test App model patterns used by annotation controller."""
+def _install(annotations: MagicMock):
+    return patch(
+        "controllers.service_api.app.annotation.application_services",
+        return_value=SimpleNamespace(service_api_annotations=annotations),
+    )
 
-    def test_app_model_has_required_fields(self):
-        """Test App model has required fields for annotation operations."""
-        app = App(
-            id=str(uuid.uuid4()),
-            status="normal",
-            enable_api=True,
-        )
-        assert app.id is not None
-        assert app.status == "normal"
-        assert app.enable_api
 
-    def test_app_model_disabled_api(self):
-        """Test app with disabled API access."""
-        app = App(
-            enable_api=False,
+def test_payload_contracts_reject_missing_required_fields() -> None:
+    with pytest.raises(ValidationError):
+        AnnotationCreatePayload.model_validate({"question": "q"})
+    with pytest.raises(ValidationError):
+        AnnotationReplyActionPayload.model_validate({"score_threshold": 0.8})
+
+
+def test_configure_reply_parses_payload_and_calls_application_service(flask_app: Flask) -> None:
+    annotations = MagicMock()
+    annotations.configure_reply.return_value = {"job_id": "job-1", "job_status": "waiting"}
+    payload = {
+        "score_threshold": 0.8,
+        "embedding_provider_name": "provider",
+        "embedding_model_name": "model",
+    }
+
+    with (
+        flask_app.test_request_context("/", method="POST", json=payload),
+        patch("controllers.service_api.app.annotation.service_api_ns") as namespace,
+        _install(annotations),
+    ):
+        namespace.payload = payload
+        response, status = unwrap(AnnotationReplyActionApi.post)(
+            AnnotationReplyActionApi(),
+            _context(),
+            "enable",
         )
 
-        assert not app.enable_api
+    assert status == 200
+    assert response["job_id"] == "job-1"
+    annotations.configure_reply.assert_called_once_with(
+        _context(),
+        action="enable",
+        score_threshold=0.8,
+        embedding_provider_name="provider",
+        embedding_model_name="model",
+    )
 
-    def test_app_model_archived_status(self):
-        """Test app with archived status."""
-        app = App(
-            status="archived",
+
+def test_list_annotations_parses_query_and_serializes_contract(flask_app: Flask) -> None:
+    annotations = MagicMock()
+    annotations.list.return_value = ServiceApiAnnotationPage(items=(_annotation(),), total=1)
+
+    with flask_app.test_request_context("/?page=2&limit=10&keyword=hello"), _install(annotations):
+        response = unwrap(AnnotationListApi.get)(AnnotationListApi(), _context())
+
+    assert response["total"] == 1
+    assert response["page"] == 2
+    assert response["data"][0]["id"] == "annotation-1"
+    annotations.list.assert_called_once_with(_context(), page=2, limit=10, keyword="hello")
+
+
+def test_create_update_and_delete_delegate_to_one_application_service(flask_app: Flask) -> None:
+    annotations = MagicMock()
+    annotations.create.return_value = _annotation()
+    annotations.update.return_value = _annotation()
+    annotation_id = uuid4()
+    payload = {"question": "question", "answer": "answer"}
+
+    with (
+        flask_app.test_request_context("/", method="POST", json=payload),
+        patch("controllers.service_api.app.annotation.service_api_ns") as namespace,
+        _install(annotations),
+    ):
+        namespace.payload = payload
+        created, created_status = unwrap(AnnotationListApi.post)(AnnotationListApi(), _context())
+        updated = unwrap(AnnotationUpdateDeleteApi.put)(
+            AnnotationUpdateDeleteApi(),
+            _context(),
+            annotation_id,
         )
-        assert app.status == "archived"
+        deleted = unwrap(AnnotationUpdateDeleteApi.delete)(
+            AnnotationUpdateDeleteApi(),
+            _context(),
+            annotation_id,
+        )
+
+    assert created_status == 201
+    assert created["id"] == "annotation-1"
+    assert updated["id"] == "annotation-1"
+    assert deleted == ("", 204)
+    annotations.create.assert_called_once_with(_context(), question="question", answer="answer")
+    annotations.update.assert_called_once_with(
+        _context(),
+        annotation_id=str(annotation_id),
+        question="question",
+        answer="answer",
+    )
+    annotations.delete.assert_called_once_with(_context(), annotation_id=str(annotation_id))
 
 
-class TestAnnotationErrorPatterns:
-    """Test annotation-related error handling patterns."""
+def test_update_maps_application_not_found(flask_app: Flask) -> None:
+    annotations = MagicMock()
+    annotations.update.side_effect = ServiceApiAnnotationNotFoundError()
+    payload = {"question": "question", "answer": "answer"}
 
-    def test_not_found_error_pattern(self):
-        """Test NotFound error pattern used in annotation operations."""
-        from werkzeug.exceptions import NotFound
-
+    with (
+        flask_app.test_request_context("/", method="PUT", json=payload),
+        patch("controllers.service_api.app.annotation.service_api_ns") as namespace,
+        _install(annotations),
+    ):
+        namespace.payload = payload
         with pytest.raises(NotFound):
-            raise NotFound("Annotation not found.")
-
-    def test_forbidden_error_pattern(self):
-        """Test Forbidden error pattern."""
-        from werkzeug.exceptions import Forbidden
-
-        with pytest.raises(Forbidden):
-            raise Forbidden("Permission denied.")
-
-    def test_value_error_for_job_not_found(self):
-        """Test ValueError pattern for job not found."""
-        with pytest.raises(ValueError, match="does not exist"):
-            raise ValueError("The job does not exist.")
-
-
-class TestAnnotationReplyActionApi:
-    def test_enable(self, app: Flask, monkeypatch: pytest.MonkeyPatch) -> None:
-        enable_mock = Mock(return_value={"job_id": "job-1", "job_status": "waiting"})
-        monkeypatch.setattr(AppAnnotationService, "enable_app_annotation", enable_mock)
-        api = AnnotationReplyActionApi()
-        handler = unwrap(api.post)
-        app_model = SimpleNamespace(id="app", tenant_id="tenant")
-        with app.test_request_context(
-            "/apps/annotation-reply/enable",
-            method="POST",
-            json={"score_threshold": 0.5, "embedding_provider_name": "p", "embedding_model_name": "m"},
-        ):
-            response, status = handler(api, app_model=app_model, action="enable")
-        assert status == 200
-        assert response == {"job_id": "job-1", "job_status": "waiting"}
-        enable_mock.assert_called_once()
-
-    def test_disable(self, app: Flask, monkeypatch: pytest.MonkeyPatch) -> None:
-        disable_mock = Mock(return_value={"job_id": "job-1", "job_status": "waiting"})
-        monkeypatch.setattr(AppAnnotationService, "disable_app_annotation", disable_mock)
-        api = AnnotationReplyActionApi()
-        handler = unwrap(api.post)
-        app_model = SimpleNamespace(id="app", tenant_id="tenant")
-        with app.test_request_context(
-            "/apps/annotation-reply/disable",
-            method="POST",
-            json={"score_threshold": 0.5, "embedding_provider_name": "p", "embedding_model_name": "m"},
-        ):
-            response, status = handler(api, app_model=app_model, action="disable")
-        assert status == 200
-        assert response == {"job_id": "job-1", "job_status": "waiting"}
-        disable_mock.assert_called_once()
-
-
-class TestAnnotationReplyActionStatusApi:
-    def test_missing_job(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(redis_client, "get", lambda *_args, **_kwargs: None)
-        api = AnnotationReplyActionStatusApi()
-        handler = unwrap(api.get)
-        app_model = SimpleNamespace(id="app")
-        with pytest.raises(ValueError):
-            handler(api, app_model=app_model, job_id="j1", action="enable")
-
-    def test_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-
-        def _get(key):
-            if "error" in key:
-                return b"oops"
-            return b"error"
-
-        monkeypatch.setattr(redis_client, "get", _get)
-        api = AnnotationReplyActionStatusApi()
-        handler = unwrap(api.get)
-        app_model = SimpleNamespace(id="app")
-        response, status = handler(api, app_model=app_model, job_id="j1", action="enable")
-        assert status == 200
-        assert response["job_status"] == "error"
-        assert response["error_msg"] == "oops"
-
-
-class TestAnnotationListApi:
-    def test_get_uses_defaults(self, app: Flask, monkeypatch: pytest.MonkeyPatch) -> None:
-        annotation = SimpleNamespace(id="a1", question="q", content="a", created_at=0)
-        get_mock = Mock(return_value=([annotation], 1))
-        monkeypatch.setattr(AppAnnotationService, "get_annotation_list_by_app_id", get_mock)
-        api = AnnotationListApi()
-        handler = unwrap(api.get)
-        app_model = SimpleNamespace(id="app")
-        with app.test_request_context("/apps/annotations", method="GET"):
-            response = handler(api, MagicMock(), app_model=app_model)
-        assert response["page"] == 1
-        assert response["limit"] == 20
-        session = get_mock.call_args.args[-1]
-        assert isinstance(session, MagicMock)
-        assert get_mock.call_args.args == ("app", 1, 20, "", session)
-
-    def test_get_accepts_valid_numeric_strings(self, app: Flask, monkeypatch: pytest.MonkeyPatch) -> None:
-        annotation = SimpleNamespace(id="a1", question="q", content="a", created_at=0)
-        get_mock = Mock(return_value=([annotation], 1))
-        monkeypatch.setattr(AppAnnotationService, "get_annotation_list_by_app_id", get_mock)
-        api = AnnotationListApi()
-        handler = unwrap(api.get)
-        app_model = SimpleNamespace(id="app")
-        with app.test_request_context("/apps/annotations?page=2&limit=5&keyword=refund", method="GET"):
-            response = handler(api, MagicMock(), app_model=app_model)
-        assert response["total"] == 1
-        assert response["page"] == 2
-        assert response["limit"] == 5
-        session = get_mock.call_args.args[-1]
-        assert isinstance(session, MagicMock)
-        assert get_mock.call_args.args == ("app", 2, 5, "refund", session)
-
-    @pytest.mark.parametrize("query_string", ["page=abc&limit=5", "page=1&limit=abc", "page=&limit=5", "limit=0"])
-    def test_get_rejects_invalid_explicit_pagination_value(
-        self, app: Flask, monkeypatch: pytest.MonkeyPatch, query_string: str
-    ) -> None:
-        get_mock = Mock(return_value=([], 0))
-        monkeypatch.setattr(AppAnnotationService, "get_annotation_list_by_app_id", get_mock)
-        api = AnnotationListApi()
-        handler = unwrap(api.get)
-        app_model = SimpleNamespace(id="app")
-        with app.test_request_context(f"/apps/annotations?{query_string}", method="GET"):
-            with pytest.raises(ValidationError):
-                handler(api, MagicMock(), app_model=app_model)
-        get_mock.assert_not_called()
-
-    def test_create(self, app: Flask, monkeypatch: pytest.MonkeyPatch) -> None:
-        annotation = SimpleNamespace(id="a1", question="q", content="a", created_at=0)
-        monkeypatch.setattr(
-            AppAnnotationService, "insert_app_annotation_directly", lambda *_args, **_kwargs: annotation
-        )
-        api = AnnotationListApi()
-        handler = unwrap(api.post)
-        app_model = SimpleNamespace(id="app")
-        with app.test_request_context("/apps/annotations", method="POST", json={"question": "q", "answer": "a"}):
-            response, status = handler(api, MagicMock(), app_model=app_model)
-        assert status == HTTPStatus.CREATED
-        assert response["question"] == "q"
-
-
-class TestAnnotationUpdateDeleteApi:
-    def test_update_delete(self, app: Flask, monkeypatch: pytest.MonkeyPatch) -> None:
-        annotation = SimpleNamespace(id="a1", question="q", content="a", created_at=0)
-        monkeypatch.setattr(
-            AppAnnotationService, "update_app_annotation_directly", lambda *_args, **_kwargs: annotation
-        )
-        delete_mock = Mock()
-        monkeypatch.setattr(AppAnnotationService, "delete_app_annotation", delete_mock)
-        api = AnnotationUpdateDeleteApi()
-        put_handler = unwrap(api.put)
-        delete_handler = unwrap(api.delete)
-        app_model = SimpleNamespace(id="app", tenant_id="tenant")
-        with app.test_request_context("/apps/annotations/1", method="PUT", json={"question": "q", "answer": "a"}):
-            response = put_handler(api, MagicMock(), app_model=app_model, annotation_id="1")
-        assert response["answer"] == "a"
-        with app.test_request_context("/apps/annotations/1", method="DELETE"):
-            response, status = delete_handler(api, MagicMock(), app_model=app_model, annotation_id="1")
-        assert status == 204
-        delete_mock.assert_called_once()
+            unwrap(AnnotationUpdateDeleteApi.put)(
+                AnnotationUpdateDeleteApi(),
+                _context(),
+                uuid4(),
+            )

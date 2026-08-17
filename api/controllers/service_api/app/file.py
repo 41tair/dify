@@ -12,13 +12,13 @@ from controllers.common.errors import (
 )
 from controllers.common.schema import register_schema_models
 from controllers.service_api import service_api_ns
+from controllers.service_api.flask_admission import service_api_admission
 from controllers.service_api.schema import multipart_file_params
-from controllers.service_api.wraps import FetchUserArg, WhereisUserArg, validate_app_token
-from extensions.ext_database import db
+from extensions.ext_application_services import application_services
 from fields.file_fields import FileResponse
 from libs.helper import dump_response
-from models import App, EndUser
-from services.file_service import FileService
+from machinery.context import ServiceApiRequestContext
+from services.entities.service_api_entities import ServiceApiEndUserRequirement, ServiceApiEndUserSource
 
 register_schema_models(service_api_ns, FileResponse)
 
@@ -55,9 +55,9 @@ class FileApi(Resource):
             415: "Unsupported file type",
         }
     )
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.FORM))  # type: ignore
+    @service_api_admission(end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.FORM))
     @service_api_ns.response(HTTPStatus.CREATED, "File uploaded", service_api_ns.models[FileResponse.__name__])
-    def post(self, app_model: App, end_user: EndUser):
+    def post(self, request_context: ServiceApiRequestContext):
         """Upload a file for use in conversations.
 
         Accepts a single file upload via multipart/form-data.
@@ -77,11 +77,11 @@ class FileApi(Resource):
             raise FilenameNotExistsError
 
         try:
-            upload_file = FileService(db.engine).upload_file(
+            upload_file = application_services().service_api_files.upload(
+                request_context,
                 filename=file.filename,
                 content=file.stream.read(),
                 mimetype=file.mimetype,
-                user=end_user,
             )
         except services.errors.file.FileTooLargeError as file_too_large_error:
             raise FileTooLargeError(file_too_large_error.description)

@@ -1,6 +1,6 @@
 import logging
 
-from flask import request
+from flask import Response, request
 from flask_restx import Resource
 from werkzeug.exceptions import InternalServerError
 
@@ -21,15 +21,14 @@ from controllers.service_api.app.error import (
     SpeechToTextDisabledError,
     UnsupportedAudioTypeError,
 )
+from controllers.service_api.flask_admission import service_api_admission
 from controllers.service_api.schema import binary_response, expect_with_user, multipart_file_params
-from controllers.service_api.wraps import FetchUserArg, WhereisUserArg, validate_app_token
 from core.errors.error import ModelCurrentlyNotSupportError, ProviderTokenNotInitError, QuotaExceededError
-from extensions.ext_database import db
+from extensions.ext_application_services import application_services
 from graphon.model_runtime.errors.invoke import InvokeError
 from libs.helper import dump_response
-from models.model import App, EndUser
-from services.app_ref_service import AppRefService
-from services.audio_service import AudioService
+from machinery.context import ServiceApiRequestContext
+from services.entities.service_api_entities import ServiceApiEndUserRequirement, ServiceApiEndUserSource
 from services.errors.audio import (
     AudioTooLargeServiceError,
     NoAudioUploadedServiceError,
@@ -95,8 +94,8 @@ class AudioApi(Resource):
         "Audio successfully transcribed",
         service_api_ns.models[AudioTranscriptResponse.__name__],
     )
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.FORM))
-    def post(self, app_model: App, end_user: EndUser):
+    @service_api_admission(end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.FORM))
+    def post(self, request_context: ServiceApiRequestContext):
         """Convert audio to text using speech-to-text.
 
         Accepts an audio file upload and returns the transcribed text.
@@ -104,11 +103,11 @@ class AudioApi(Resource):
         file = request.files.get("file")
 
         try:
-            response = AudioService.transcript_asr(
-                app_model=app_model,
-                file=file,
-                session=db.session(),
-                end_user=end_user.id,
+            response = application_services().service_api_files.audio_to_text(
+                request_context,
+                filename=file.filename if file is not None else None,
+                stream=file.stream if file is not None else None,
+                mimetype=file.mimetype if file is not None else None,
             )
 
             return dump_response(AudioTranscriptResponse, response)
@@ -178,8 +177,8 @@ class TextApi(Resource):
     )
     # TTS returns provider audio bytes, so the success response is intentionally schema-less.
     @service_api_ns.response(200, "Text successfully converted to audio")
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.JSON))
-    def post(self, app_model: App, end_user: EndUser):
+    @service_api_admission(end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.JSON))
+    def post(self, request_context: ServiceApiRequestContext):
         """Convert text to audio using text-to-speech.
 
         Converts the provided text to audio using the specified voice.
@@ -190,22 +189,15 @@ class TextApi(Resource):
             message_id = payload.message_id
             text = payload.text
             voice = payload.voice
-            message_ref = None
-            if message_id:
-                app_ref = AppRefService.create_app_ref(app_model)
-                message_ref = AppRefService.create_message_ref(
-                    app_ref,
-                    message_id,
-                    end_user_id=end_user.id,
-                )
-            return AudioService.transcript_tts(
-                app_model=app_model,
-                session=db.session(),
+            result = application_services().service_api_files.text_to_audio(
+                request_context,
                 text=text,
                 voice=voice,
-                end_user=end_user.external_user_id,
-                message_ref=message_ref,
+                message_id=message_id,
             )
+            if result.mime_type is not None:
+                return Response(result.body, content_type=result.mime_type, direct_passthrough=True)
+            return result.body
         except services.errors.app_model_config.AppModelConfigBrokenError:
             logger.exception("App model config broken.")
             raise AppUnavailableError()

@@ -7,18 +7,15 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from inspect import unwrap
 from types import SimpleNamespace
 from typing import override
 from unittest.mock import ANY, MagicMock, Mock
 
 import pytest
-from flask import Flask
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 import services.app_generate_service as ags_module
-from controllers.service_api.app.workflow_events import WorkflowEventsApi
 from core.app.app_config.entities import AppAdditionalFeatures, WorkflowUIBasedAppConfig
 from core.app.apps.common import workflow_response_converter
 from core.app.apps.common.workflow_response_converter import WorkflowResponseConverter
@@ -40,14 +37,16 @@ from enums import DeploymentEdition
 from graphon.entities import WorkflowStartReason
 from graphon.enums import WorkflowExecutionStatus, WorkflowNodeExecutionStatus
 from graphon.runtime import GraphRuntimeState, VariablePool
+from machinery.context import ServiceApiEndUserIdentity, ServiceApiRequestContext
 from models.account import Account
-from models.enums import CreatorUserRole, MessageStatus
+from models.enums import CreatorUserRole, EndUserType, MessageStatus
 from models.human_input import HumanInputForm
-from models.model import AppMode
+from models.model import App, AppMode, EndUser
 from models.workflow import WorkflowRun
 from repositories.api_workflow_node_execution_repository import WorkflowNodeExecutionSnapshot
 from repositories.entities.workflow_pause import WorkflowPauseEntity
 from services.app_generate_service import AppGenerateService
+from services.service_api_workflow_gateway import DefaultServiceApiWorkflowGateway
 from services.workflow_event_snapshot_service import _build_snapshot_events
 
 
@@ -70,16 +69,49 @@ class _DummyRateLimit:
         return generator
 
 
-def _mock_repo_for_run(monkeypatch: pytest.MonkeyPatch, workflow_run, sqlite_engine: Engine):
-    workflow_events_module = sys.modules["controllers.service_api.app.workflow_events"]
+def _mock_repo_for_run(monkeypatch: pytest.MonkeyPatch, workflow_run):
+    workflow_gateway_module = sys.modules["services.service_api_workflow_gateway"]
     repo = SimpleNamespace(get_workflow_run_by_id_and_tenant_id=lambda **_kwargs: workflow_run)
     monkeypatch.setattr(
-        workflow_events_module.DifyAPIRepositoryFactory,
+        workflow_gateway_module.DifyAPIRepositoryFactory,
         "create_api_workflow_run_repository",
         lambda *_args, **_kwargs: repo,
     )
-    monkeypatch.setattr(workflow_events_module, "db", SimpleNamespace(engine=sqlite_engine))
-    return workflow_events_module
+    return workflow_gateway_module
+
+
+def _service_api_workflow_gateway(sqlite_engine: Engine) -> DefaultServiceApiWorkflowGateway:
+    maker = sessionmaker(bind=sqlite_engine, expire_on_commit=False)
+    with maker.begin() as session:
+        session.add_all(
+            [
+                App(
+                    id="app-1",
+                    tenant_id="tenant-1",
+                    mode=AppMode.WORKFLOW,
+                    name="Workflow",
+                    enable_site=True,
+                    enable_api=True,
+                ),
+                EndUser(
+                    id="end-user-1",
+                    tenant_id="tenant-1",
+                    app_id="app-1",
+                    type=EndUserType.SERVICE_API,
+                    session_id="external-1",
+                    is_anonymous=False,
+                ),
+            ]
+        )
+    return DefaultServiceApiWorkflowGateway(session_factory=maker, redis=MagicMock())
+
+
+def _service_api_context() -> ServiceApiRequestContext:
+    return ServiceApiRequestContext(
+        tenant_id="tenant-1",
+        app_id="app-1",
+        end_user=ServiceApiEndUserIdentity(id="end-user-1", external_user_id="external-1"),
+    )
 
 
 def _persist_human_input_form(
@@ -282,7 +314,6 @@ class TestHitlServiceApi:
     # Service API event-stream continuation
     def test_workflow_events_continue_on_pause_keeps_stream_open(
         self,
-        app: Flask,
         monkeypatch: pytest.MonkeyPatch,
         sqlite_engine: Engine,
     ) -> None:
@@ -293,27 +324,25 @@ class TestHitlServiceApi:
             created_by="end-user-1",
             finished_at=None,
         )
-        workflow_events_module = _mock_repo_for_run(
+        workflow_gateway_module = _mock_repo_for_run(
             monkeypatch,
             workflow_run=workflow_run,
-            sqlite_engine=sqlite_engine,
         )
         msg_generator = Mock()
         msg_generator.retrieve_events.return_value = ["raw-event"]
         workflow_generator = Mock()
         workflow_generator.convert_to_event_stream.return_value = iter(["data: streamed\n\n"])
-        monkeypatch.setattr(workflow_events_module, "MessageGenerator", lambda: msg_generator)
-        monkeypatch.setattr(workflow_events_module, "WorkflowAppGenerator", lambda: workflow_generator)
+        monkeypatch.setattr(workflow_gateway_module, "MessageGenerator", lambda: msg_generator)
+        monkeypatch.setattr(workflow_gateway_module, "WorkflowAppGenerator", lambda: workflow_generator)
 
-        api = WorkflowEventsApi()
-        handler = unwrap(api.get)
-        app_model = SimpleNamespace(id="app-1", tenant_id="tenant-1", mode=AppMode.WORKFLOW)
-        end_user = SimpleNamespace(id="end-user-1")
+        events = _service_api_workflow_gateway(sqlite_engine).stream_events(
+            _service_api_context(),
+            task_id="run-1",
+            include_state_snapshot=False,
+            continue_on_pause=True,
+        )
 
-        with app.test_request_context("/workflow/run-1/events?user=u1&continue_on_pause=true", method="GET"):
-            response = handler(api, app_model=app_model, end_user=end_user, task_id="run-1")
-
-        assert response.get_data(as_text=True) == "data: streamed\n\n"
+        assert list(events) == ["data: streamed\n\n"]
         msg_generator.retrieve_events.assert_called_once_with(
             AppMode.WORKFLOW,
             "run-1",
@@ -323,7 +352,6 @@ class TestHitlServiceApi:
 
     def test_workflow_events_snapshot_continue_on_pause_keeps_pause_open(
         self,
-        app: Flask,
         monkeypatch: pytest.MonkeyPatch,
         sqlite_engine: Engine,
     ) -> None:
@@ -334,31 +362,26 @@ class TestHitlServiceApi:
             created_by="end-user-1",
             finished_at=None,
         )
-        workflow_events_module = _mock_repo_for_run(
+        workflow_gateway_module = _mock_repo_for_run(
             monkeypatch,
             workflow_run=workflow_run,
-            sqlite_engine=sqlite_engine,
         )
         msg_generator = Mock()
         workflow_generator = Mock()
         workflow_generator.convert_to_event_stream.return_value = iter(["data: snapshot\n\n"])
         snapshot_builder = Mock(return_value=["snapshot-events"])
-        monkeypatch.setattr(workflow_events_module, "MessageGenerator", lambda: msg_generator)
-        monkeypatch.setattr(workflow_events_module, "WorkflowAppGenerator", lambda: workflow_generator)
-        monkeypatch.setattr(workflow_events_module, "build_workflow_event_stream", snapshot_builder)
+        monkeypatch.setattr(workflow_gateway_module, "MessageGenerator", lambda: msg_generator)
+        monkeypatch.setattr(workflow_gateway_module, "WorkflowAppGenerator", lambda: workflow_generator)
+        monkeypatch.setattr(workflow_gateway_module, "build_workflow_event_stream", snapshot_builder)
 
-        api = WorkflowEventsApi()
-        handler = unwrap(api.get)
-        app_model = SimpleNamespace(id="app-1", tenant_id="tenant-1", mode=AppMode.WORKFLOW)
-        end_user = SimpleNamespace(id="end-user-1")
+        events = _service_api_workflow_gateway(sqlite_engine).stream_events(
+            _service_api_context(),
+            task_id="run-1",
+            include_state_snapshot=True,
+            continue_on_pause=True,
+        )
 
-        with app.test_request_context(
-            "/workflow/run-1/events?user=u1&include_state_snapshot=true&continue_on_pause=true",
-            method="GET",
-        ):
-            response = handler(api, app_model=app_model, end_user=end_user, task_id="run-1")
-
-        assert response.get_data(as_text=True) == "data: snapshot\n\n"
+        assert list(events) == ["data: snapshot\n\n"]
         msg_generator.retrieve_events.assert_not_called()
         snapshot_builder.assert_called_once_with(
             app_mode=AppMode.WORKFLOW,

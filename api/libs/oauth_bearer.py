@@ -586,7 +586,7 @@ def validate_bearer(*, accept: frozenset[Accepts]) -> Callable[[Callable[_DP, _D
     """Opt-in: omitting it leaves the route unauthenticated.
 
     Resolves user-level OAuth bearers (``dfoa_`` / ``dfoe_``). Legacy
-    ``app-`` keys belong to ``service_api/wraps.py:validate_app_token``
+    ``app-`` keys belong to the Service API admission boundary
     and are rejected here as the wrong auth scheme for this surface.
     """
 

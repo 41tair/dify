@@ -6,14 +6,11 @@ from flask import request
 from flask_restx import Resource
 from pydantic import BaseModel, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
-from sqlalchemy.orm import Session
 from werkzeug.exceptions import BadRequest, InternalServerError, NotFound
 
 import services
-from configs import dify_config
 from controllers.common.fields import SimpleResultResponse
 from controllers.common.schema import register_response_schema_models, register_schema_models
-from controllers.console.app.wraps import with_session
 from controllers.service_api import service_api_ns
 from controllers.service_api.app.error import (
     AgentNotPublishedError,
@@ -26,44 +23,37 @@ from controllers.service_api.app.error import (
     ProviderQuotaExceededError,
     WorkflowVersionExecutionNotAllowedError,
 )
+from controllers.service_api.flask_admission import service_api_admission
 from controllers.service_api.schema import (
     InputFileList,
     expect_user_json,
     expect_with_user,
     json_or_event_stream_response,
 )
-from controllers.service_api.wraps import FetchUserArg, WhereisUserArg, validate_app_token
 from controllers.web.error import InvokeRateLimitError as InvokeRateLimitHttpError
 from core.app.apps.agent_app.errors import AgentAppNotPublishedError
-from core.app.entities.app_invoke_entities import InvokeFrom
 from core.errors.error import (
     ModelCurrentlyNotSupportError,
     ProviderTokenNotInitError,
     QuotaExceededError,
 )
 from core.helper.trace_id_helper import get_external_trace_id, get_trace_session_id, omit_trace_session_id_from_payload
-from enums import CloudPlan, DeploymentEdition
+from extensions.ext_application_services import application_services
 from graphon.model_runtime.errors.invoke import InvokeError
 from libs import helper
 from libs.helper import UUIDStrOrEmpty
-from models.model import App, AppMode, EndUser
-from services.app_generate_service import AppGenerateService
-from services.app_task_service import AppTaskService
-from services.billing_service import BillingService
-from services.conversation_service import ConversationService
+from machinery.context import ServiceApiRequestContext
+from services.entities.service_api_entities import ServiceApiEndUserRequirement, ServiceApiEndUserSource
 from services.errors.app import IsDraftWorkflowError, WorkflowIdFormatError, WorkflowNotFoundError
 from services.errors.llm import InvokeRateLimitError
+from services.service_api_generation_service import (
+    ServiceApiAgentStreamingOnlyError,
+    ServiceApiGenerationAppUnavailableError,
+    ServiceApiGenerationNotChatAppError,
+    ServiceApiWorkflowVersionNotAllowedError,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_agent_app_streaming(*, app_mode: AppMode, response_mode: str | None) -> bool:
-    """Agent App runtime is SSE-only until backend blocking runs are supported."""
-    if app_mode != AppMode.AGENT:
-        return response_mode == "streaming"
-    if response_mode == "blocking":
-        raise BadRequest("Agent App only supports streaming response mode.")
-    return True
 
 
 class CompletionRequestPayload(BaseModel):
@@ -207,17 +197,15 @@ class CompletionApi(Resource):
         }
     )
     @service_api_ns.response(200, "Completion created successfully")
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.JSON, required=True))
-    @with_session
-    def post(self, session: Session, app_model: App, end_user: EndUser):
+    @service_api_admission(
+        end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.JSON, required=True)
+    )
+    def post(self, request_context: ServiceApiRequestContext):
         """Create a completion for the given prompt.
 
         This endpoint generates a completion based on the provided inputs and query.
         Supports both blocking and streaming response modes.
         """
-        if app_model.mode != AppMode.COMPLETION:
-            raise AppUnavailableError()
-
         payload = CompletionRequestPayload.model_validate(
             omit_trace_session_id_from_payload(service_api_ns.payload) or {}
         )
@@ -234,17 +222,16 @@ class CompletionApi(Resource):
         args["auto_generate_name"] = False
 
         try:
-            response = AppGenerateService.generate(
-                session=session,
-                app_model=app_model,
-                user=end_user,
+            response = application_services().service_api_generation.generate_completion(
+                request_context,
                 args=args,
-                invoke_from=InvokeFrom.SERVICE_API,
                 streaming=streaming,
             )
 
             # response-contract:ignore compact_generate_response
             return helper.compact_generate_response(response)
+        except ServiceApiGenerationAppUnavailableError as error:
+            raise AppUnavailableError() from error
         except services.errors.conversation.ConversationNotExistsError:
             raise NotFound("Conversation Not Exists.")
         except services.errors.conversation.ConversationCompletedError:
@@ -293,18 +280,15 @@ class CompletionStopApi(Resource):
         }
     )
     @service_api_ns.response(200, "Task stopped successfully", service_api_ns.models[SimpleResultResponse.__name__])
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.JSON, required=True))
-    def post(self, app_model: App, end_user: EndUser, task_id: str):
+    @service_api_admission(
+        end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.JSON, required=True)
+    )
+    def post(self, request_context: ServiceApiRequestContext, task_id: str):
         """Stop a running completion task."""
-        if app_model.mode != AppMode.COMPLETION:
-            raise AppUnavailableError()
-
-        AppTaskService.stop_task(
-            task_id=task_id,
-            invoke_from=InvokeFrom.SERVICE_API,
-            user_id=end_user.id,
-            app_mode=AppMode.value_of(app_model.mode),
-        )
+        try:
+            application_services().service_api_generation.stop_completion(request_context, task_id=task_id)
+        except ServiceApiGenerationAppUnavailableError as error:
+            raise AppUnavailableError() from error
 
         return SimpleResultResponse(result="success").model_dump(mode="json"), 200
 
@@ -362,28 +346,16 @@ class ChatApi(Resource):
         }
     )
     @service_api_ns.response(200, "Message sent successfully")
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.JSON, required=True))
-    @with_session
-    def post(self, session: Session, app_model: App, end_user: EndUser):
+    @service_api_admission(
+        end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.JSON, required=True)
+    )
+    def post(self, request_context: ServiceApiRequestContext):
         """Send a message in a chat conversation.
 
         This endpoint handles chat messages for chat, agent chat, and advanced chat applications.
         Supports conversation management and both blocking and streaming response modes.
         """
-        app_mode = AppMode.value_of(app_model.mode)
-        if app_mode not in {AppMode.CHAT, AppMode.AGENT_CHAT, AppMode.ADVANCED_CHAT, AppMode.AGENT}:
-            raise NotChatAppError()
-
         payload = ChatRequestPayload.model_validate(omit_trace_session_id_from_payload(service_api_ns.payload) or {})
-
-        if (
-            app_mode == AppMode.ADVANCED_CHAT
-            and payload.workflow_id
-            and dify_config.DEPLOYMENT_EDITION == DeploymentEdition.CLOUD
-        ):
-            billing_info = BillingService.get_info(app_model.tenant_id, exclude_vector_space=True)
-            if billing_info["enabled"] and billing_info["subscription"]["plan"] == CloudPlan.SANDBOX:
-                raise WorkflowVersionExecutionNotAllowedError()
 
         external_trace_id = get_external_trace_id(request)
         args = payload.model_dump(exclude_none=True)
@@ -393,29 +365,23 @@ class ChatApi(Resource):
         if external_trace_id:
             args["external_trace_id"] = external_trace_id
 
-        streaming = _resolve_agent_app_streaming(app_mode=app_mode, response_mode=payload.response_mode)
-
         try:
-            # Eagerly validate conversation to avoid hanging on invalid conversation_id
-            if payload.conversation_id:
-                ConversationService.get_conversation(
-                    app_model=app_model,
-                    conversation_id=payload.conversation_id,
-                    user=end_user,
-                    session=session,
-                )
-
-            response = AppGenerateService.generate(
-                session=session,
-                app_model=app_model,
-                user=end_user,
+            response = application_services().service_api_generation.generate_chat(
+                request_context,
                 args=args,
-                invoke_from=InvokeFrom.SERVICE_API,
-                streaming=streaming,
+                response_mode=payload.response_mode,
+                workflow_id=payload.workflow_id,
+                conversation_id=payload.conversation_id,
             )
 
             # response-contract:ignore compact_generate_response
             return helper.compact_generate_response(response)
+        except ServiceApiGenerationNotChatAppError as error:
+            raise NotChatAppError() from error
+        except ServiceApiAgentStreamingOnlyError as error:
+            raise BadRequest("Agent App only supports streaming response mode.") from error
+        except ServiceApiWorkflowVersionNotAllowedError as error:
+            raise WorkflowVersionExecutionNotAllowedError() from error
         except WorkflowNotFoundError as ex:
             raise NotFound(str(ex))
         except IsDraftWorkflowError as ex:
@@ -472,18 +438,14 @@ class ChatStopApi(Resource):
         }
     )
     @service_api_ns.response(200, "Task stopped successfully", service_api_ns.models[SimpleResultResponse.__name__])
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.JSON, required=True))
-    def post(self, app_model: App, end_user: EndUser, task_id: str):
+    @service_api_admission(
+        end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.JSON, required=True)
+    )
+    def post(self, request_context: ServiceApiRequestContext, task_id: str):
         """Stop a running chat message generation."""
-        app_mode = AppMode.value_of(app_model.mode)
-        if app_mode not in {AppMode.CHAT, AppMode.AGENT_CHAT, AppMode.ADVANCED_CHAT, AppMode.AGENT}:
-            raise NotChatAppError()
-
-        AppTaskService.stop_task(
-            task_id=task_id,
-            invoke_from=InvokeFrom.SERVICE_API,
-            user_id=end_user.id,
-            app_mode=app_mode,
-        )
+        try:
+            application_services().service_api_generation.stop_chat(request_context, task_id=task_id)
+        except ServiceApiGenerationNotChatAppError as error:
+            raise NotChatAppError() from error
 
         return SimpleResultResponse(result="success").model_dump(mode="json"), 200

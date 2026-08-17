@@ -3,7 +3,7 @@ from uuid import UUID
 
 from flask import request
 from flask_restx import Resource
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, Field
 from werkzeug.exceptions import BadRequest, InternalServerError, NotFound
 
 import services
@@ -12,21 +12,20 @@ from controllers.common.fields import SimpleResultStringListResponse
 from controllers.common.schema import query_params_from_model, register_response_schema_models, register_schema_models
 from controllers.service_api import service_api_ns
 from controllers.service_api.app.error import NotChatAppError
+from controllers.service_api.flask_admission import service_api_admission
 from controllers.service_api.schema import expect_with_user
-from controllers.service_api.wraps import FetchUserArg, WhereisUserArg, validate_app_token
-from core.app.entities.app_invoke_entities import InvokeFrom
-from extensions.ext_database import db
+from extensions.ext_application_services import application_services
 from fields.base import ResponseModel
-from fields.conversation_fields import MessageResponseSource, ResultResponse
+from fields.conversation_fields import ResultResponse
 from fields.message_fields import MessageInfiniteScrollPagination, MessageListItem
-from models.enums import FeedbackRating
-from models.model import App, AppMode, EndUser
+from machinery.context import ServiceApiRequestContext
+from services.entities.service_api_entities import ServiceApiEndUserRequirement, ServiceApiEndUserSource
 from services.errors.message import (
     FirstMessageNotExistsError,
     MessageNotExistsError,
     SuggestedQuestionsAfterAnswerDisabledError,
 )
-from services.message_service import MessageService
+from services.service_api_conversation_service import ServiceApiNotChatAppError
 
 logger = logging.getLogger(__name__)
 
@@ -96,33 +95,26 @@ class MessageListApi(Resource):
         "Messages retrieved successfully",
         service_api_ns.models[MessageInfiniteScrollPagination.__name__],
     )
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.QUERY))
-    def get(self, app_model: App, end_user: EndUser):
+    @service_api_admission(end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.QUERY))
+    def get(self, request_context: ServiceApiRequestContext):
         """List messages in a conversation.
 
         Retrieves messages with pagination support using first_id.
         """
-        app_mode = AppMode.value_of(app_model.mode)
-        if app_mode not in {AppMode.CHAT, AppMode.AGENT_CHAT, AppMode.ADVANCED_CHAT, AppMode.AGENT}:
-            raise NotChatAppError()
-
         query_args = MessageListQuery.model_validate(request.args.to_dict())
         conversation_id = query_args.conversation_id
         first_id = query_args.first_id or None
 
         try:
-            session = db.session()
-            pagination = MessageService.pagination_by_first_id(
-                app_model, end_user, conversation_id, first_id, query_args.limit, session=session
+            result = application_services().service_api_conversations.list_messages(
+                request_context,
+                conversation_id=conversation_id,
+                first_id=first_id,
+                limit=query_args.limit,
             )
-            adapter = TypeAdapter(MessageListItem)
-            items = [
-                adapter.validate_python(MessageResponseSource(message, session=session), from_attributes=True)
-                for message in pagination.data
-            ]
-            return MessageInfiniteScrollPagination(
-                limit=pagination.limit, has_more=pagination.has_more, data=items
-            ).model_dump(mode="json")
+            return MessageInfiniteScrollPagination.model_validate(result).model_dump(mode="json")
+        except ServiceApiNotChatAppError as error:
+            raise NotChatAppError() from error
         except services.errors.conversation.ConversationNotExistsError:
             raise NotFound("Conversation Not Exists.")
         except FirstMessageNotExistsError:
@@ -154,8 +146,10 @@ class MessageFeedbackApi(Resource):
             404: "Message not found",
         }
     )
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.JSON, required=True))
-    def post(self, app_model: App, end_user: EndUser, message_id: UUID):
+    @service_api_admission(
+        end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.JSON, required=True)
+    )
+    def post(self, request_context: ServiceApiRequestContext, message_id: UUID):
         """Submit feedback for a message.
 
         Allows users to rate messages as like/dislike and provide optional feedback content.
@@ -165,14 +159,14 @@ class MessageFeedbackApi(Resource):
         payload = MessageFeedbackPayload.model_validate(service_api_ns.payload or {})
 
         try:
-            MessageService.create_feedback(
-                app_model=app_model,
+            application_services().service_api_conversations.submit_feedback(
+                request_context,
                 message_id=message_id_str,
-                user=end_user,
-                rating=FeedbackRating(payload.rating) if payload.rating else None,
+                rating=payload.rating,
                 content=payload.content,
-                session=db.session(),
             )
+        except ServiceApiNotChatAppError as error:
+            raise NotChatAppError() from error
         except MessageNotExistsError:
             raise NotFound("Message Not Exists.")
 
@@ -206,17 +200,19 @@ class AppGetFeedbacksApi(Resource):
         "Feedbacks retrieved successfully",
         service_api_ns.models[AppFeedbackListResponse.__name__],
     )
-    @validate_app_token
-    def get(self, app_model: App):
+    @service_api_admission()
+    def get(self, request_context: ServiceApiRequestContext):
         """Get all feedbacks for the application.
 
         Returns paginated list of all feedback submitted for messages in this app.
         """
         query_args = FeedbackListQuery.model_validate(request.args.to_dict())
-        feedbacks = MessageService.get_all_messages_feedbacks(
-            app_model, page=query_args.page, limit=query_args.limit, session=db.session()
+        feedbacks = application_services().service_api_conversations.list_feedbacks(
+            request_context,
+            page=query_args.page,
+            limit=query_args.limit,
         )
-        return AppFeedbackListResponse(data=feedbacks).model_dump(mode="json")
+        return AppFeedbackListResponse.model_validate({"data": feedbacks}).model_dump(mode="json")
 
 
 @service_api_ns.route("/messages/<uuid:message_id>/suggested")
@@ -252,25 +248,22 @@ class MessageSuggestedApi(Resource):
             500: "Internal server error",
         }
     )
-    @validate_app_token(fetch_user_arg=FetchUserArg(fetch_from=WhereisUserArg.QUERY, required=True))
-    def get(self, app_model: App, end_user: EndUser, message_id: UUID):
+    @service_api_admission(
+        end_user=ServiceApiEndUserRequirement(source=ServiceApiEndUserSource.QUERY, required=True)
+    )
+    def get(self, request_context: ServiceApiRequestContext, message_id: UUID):
         """Get suggested follow-up questions for a message.
 
         Returns AI-generated follow-up questions based on the message content.
         """
         message_id_str = str(message_id)
-        app_mode = AppMode.value_of(app_model.mode)
-        if app_mode not in {AppMode.CHAT, AppMode.AGENT_CHAT, AppMode.ADVANCED_CHAT, AppMode.AGENT}:
-            raise NotChatAppError()
-
         try:
-            questions = MessageService.get_suggested_questions_after_answer(
-                app_model=app_model,
-                user=end_user,
+            questions = application_services().service_api_conversations.suggested_questions(
+                request_context,
                 message_id=message_id_str,
-                invoke_from=InvokeFrom.SERVICE_API,
-                session=db.session(),
             )
+        except ServiceApiNotChatAppError as error:
+            raise NotChatAppError() from error
         except MessageNotExistsError:
             raise NotFound("Message Not Exists.")
         except SuggestedQuestionsAfterAnswerDisabledError:

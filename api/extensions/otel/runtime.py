@@ -19,6 +19,34 @@ from models import Account, EndUser
 logger = logging.getLogger(__name__)
 
 
+def enrich_current_span_identity(
+    *,
+    tenant_id: str,
+    app_id: str,
+    actor_id: str,
+    actor_type: str,
+) -> None:
+    """Attach an already admitted primitive identity to the active span."""
+    if not dify_config.ENABLE_OTEL:
+        return
+
+    try:
+        current_span = trace.get_current_span()
+        if not current_span.is_recording():
+            return
+        current_span.set_attributes(
+            {
+                DifySpanAttributes.TENANT_ID: tenant_id,
+                DifySpanAttributes.APP_ID: app_id,
+                DifySpanAttributes.USER_TYPE: actor_type,
+                GenAIAttributes.USER_ID: actor_id,
+            }
+        )
+    except Exception:
+        # Observability enrichment must never reject an admitted request.
+        logger.exception("Error setting admitted Service API identity attributes")
+
+
 def setup_context_propagation() -> None:
     set_global_textmap(
         CompositePropagator(

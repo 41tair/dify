@@ -13,17 +13,37 @@ from core.schemas.schema_manager import SchemaManager
 from enums import DeploymentEdition
 from extensions.ext_redis import RedisClientWrapper, redis_client
 from repositories.app_definition_query_repository import AppDefinitionQueryRepository
+from repositories.end_user_query_repository import EndUserQueryRepository
 from repositories.explore_banner_query_repository import ExploreBannerQueryRepository
 from repositories.installation_state_repository import InstallationStateRepository
+from repositories.service_api_admission_repository import SqlAlchemyServiceApiAdmissionRepository
 from repositories.workspace_member_query_repository import WorkspaceMemberQueryRepository
 from repositories.workspace_query_repository import WorkspaceQueryRepository
 from services.app_definition_query_service import AppDefinitionQueryService
+from services.end_user_query_service import EndUserQueryService
 from services.explore_banner_query_service import ExploreBannerQueryService
 from services.feature_query_service import FeatureQueryService
 from services.feature_service import FeatureService
 from services.feature_service_gateway import FeatureServiceGateway
 from services.init_validation_service import InitValidationService
 from services.schema_definition_service import SchemaDefinitionService
+from services.service_api_admission_service import ServiceApiAdmissionService
+from services.service_api_annotation_gateway import SqlAlchemyServiceApiAnnotationGateway
+from services.service_api_annotation_service import ServiceApiAnnotationService
+from services.service_api_conversation_gateway import SqlAlchemyServiceApiConversationGateway
+from services.service_api_conversation_service import ServiceApiConversationService
+from services.service_api_file_gateway import SqlAlchemyServiceApiFileGateway
+from services.service_api_file_service import ServiceApiFileService
+from services.service_api_generation_gateway import DefaultServiceApiGenerationGateway
+from services.service_api_generation_service import ServiceApiGenerationService
+from services.service_api_human_input_gateway import DefaultServiceApiHumanInputGateway
+from services.service_api_human_input_service import ServiceApiHumanInputService
+from services.service_api_site_gateway import SqlAlchemyServiceApiSiteGateway
+from services.service_api_site_service import ServiceApiSiteService
+from services.service_api_token_gateway import CachedServiceApiTokenGateway
+from services.service_api_workflow_gateway import DefaultServiceApiWorkflowGateway
+from services.service_api_workflow_service import ServiceApiWorkflowService
+from services.service_api_workflow_version_gateway import DeploymentServiceApiWorkflowVersionPolicy
 from services.setup_adapters import RedisSetupLock, RegisterServiceAccountProvisioner
 from services.setup_service import SetupService
 from services.workspace_member_query_service import WorkspaceMemberQueryService
@@ -37,6 +57,15 @@ _EXTENSION_KEY = "application_services"
 @dataclass(frozen=True, slots=True)
 class ApplicationServices:
     app_definitions: AppDefinitionQueryService
+    end_user_queries: EndUserQueryService
+    service_api_admission: ServiceApiAdmissionService
+    service_api_annotations: ServiceApiAnnotationService
+    service_api_files: ServiceApiFileService
+    service_api_human_inputs: ServiceApiHumanInputService
+    service_api_conversations: ServiceApiConversationService
+    service_api_generation: ServiceApiGenerationService
+    service_api_sites: ServiceApiSiteService
+    service_api_workflows: ServiceApiWorkflowService
     explore_banner_queries: ExploreBannerQueryService
     schema_definitions: SchemaDefinitionService
     setup: SetupService
@@ -54,12 +83,51 @@ def build_application_services(
     redis: RedisClientWrapper,
 ) -> ApplicationServices:
     installation_state = InstallationStateRepository(client=database_client)
+    service_api_workflow_versions = DeploymentServiceApiWorkflowVersionPolicy(
+        deployment_edition=deployment_edition,
+    )
     return ApplicationServices(
         app_definitions=AppDefinitionQueryService(
             definitions=AppDefinitionQueryRepository(session_factory=database_client),
             builtin_icon_url_prefix=(
                 dify_config.CONSOLE_API_URL + "/console/api/workspaces/current/tool-provider/builtin/"
             ),
+        ),
+        end_user_queries=EndUserQueryService(
+            end_users=EndUserQueryRepository(session_factory=database_client),
+        ),
+        service_api_admission=ServiceApiAdmissionService(
+            tokens=CachedServiceApiTokenGateway(),
+            admissions=SqlAlchemyServiceApiAdmissionRepository(session_factory=database_client),
+        ),
+        service_api_annotations=ServiceApiAnnotationService(
+            annotations=SqlAlchemyServiceApiAnnotationGateway(
+                session_factory=database_client,
+                redis=redis,
+            ),
+        ),
+        service_api_files=ServiceApiFileService(
+            files=SqlAlchemyServiceApiFileGateway(session_factory=database_client),
+        ),
+        service_api_human_inputs=ServiceApiHumanInputService(
+            forms=DefaultServiceApiHumanInputGateway(session_factory=database_client),
+        ),
+        service_api_conversations=ServiceApiConversationService(
+            conversations=SqlAlchemyServiceApiConversationGateway(session_factory=database_client),
+        ),
+        service_api_generation=ServiceApiGenerationService(
+            generation=DefaultServiceApiGenerationGateway(session_factory=database_client),
+            workflow_versions=service_api_workflow_versions,
+        ),
+        service_api_sites=ServiceApiSiteService(
+            sites=SqlAlchemyServiceApiSiteGateway(session_factory=database_client),
+        ),
+        service_api_workflows=ServiceApiWorkflowService(
+            workflows=DefaultServiceApiWorkflowGateway(
+                session_factory=database_client,
+                redis=redis,
+            ),
+            workflow_versions=service_api_workflow_versions,
         ),
         explore_banner_queries=ExploreBannerQueryService(
             banners=ExploreBannerQueryRepository(client=database_client),

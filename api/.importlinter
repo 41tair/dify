@@ -138,6 +138,76 @@ forbidden_modules =
     sqlalchemy
     werkzeug
 
+[importlinter:contract:end-user-query-service-boundary]
+name = End-user query application service is framework and persistence neutral
+type = forbidden
+source_modules =
+    services.end_user_query_service
+    services.entities.end_user_entities
+forbidden_modules =
+    controllers
+    extensions
+    flask
+    models
+    repositories
+    sqlalchemy
+    werkzeug
+
+[importlinter:contract:service-api-application-boundary]
+name = Service API application services are framework and persistence neutral
+type = forbidden
+source_modules =
+    services.service_api_admission_service
+    services.service_api_annotation_service
+    services.service_api_site_service
+    services.service_api_conversation_service
+    services.service_api_file_service
+    services.service_api_generation_service
+    services.service_api_human_input_service
+    services.service_api_workflow_service
+    services.entities.service_api_entities
+forbidden_modules =
+    controllers
+    extensions
+    flask
+    models
+    repositories
+    sqlalchemy
+    werkzeug
+
+[importlinter:contract:service-api-controller-persistence-boundary]
+name = Service API app controllers do not access persistence directly
+type = forbidden
+source_modules =
+    controllers.service_api.app
+    controllers.service_api.end_user
+forbidden_modules =
+    extensions.ext_database
+    flask_login
+    models
+    repositories
+    sqlalchemy
+allow_indirect_imports = True
+
+[importlinter:contract:service-api-gateway-transport-boundary]
+name = Service API gateways do not own HTTP response contracts
+type = forbidden
+source_modules =
+    services.service_api_annotation_gateway
+    services.service_api_site_gateway
+    services.service_api_conversation_gateway
+    services.service_api_file_gateway
+    services.service_api_generation_gateway
+    services.service_api_human_input_gateway
+    services.service_api_token_gateway
+    services.service_api_workflow_gateway
+    services.service_api_workflow_version_gateway
+forbidden_modules =
+    controllers
+    fields
+    flask
+allow_indirect_imports = True
+
 [importlinter:contract:setup-service-boundary]
 name = Setup application service is framework and persistence neutral
 type = forbidden
